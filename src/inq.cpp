@@ -27,6 +27,10 @@ using hook::Ctx;
 
 bool g_ready = false;
 
+// 诊断：钩子在游戏线程里只记个数，Tick 里再写日志
+volatile LONG g_evEquip = 0, g_evReset = 0, g_evAccept = 0, g_evDepart = 0;
+volatile LONG64 g_mantleCalls = 0, g_mantleSkips = 0;   // 衣装修复那个函数：被调几次 / 被我们提前返回几次
+
 enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWindow = 8 };
 
 // ---------------------------------------------------------------------------
@@ -79,6 +83,7 @@ void OnApplyResetAndEquip(Ctx* c)
         c->rdi = rdi;
         c->rsi = rsi;
         c->r10 = r10;
+        ::InterlockedIncrement(&g_evEquip);
         return;
     }
 
@@ -137,6 +142,7 @@ void OnApplyResetAndEquip(Ctx* c)
     c->rbx = rsi + 0x2270;
     c->rdi = rdi;
     c->rsi = rsi;
+    ::InterlockedIncrement(&g_evReset);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +175,7 @@ void OnQuestLoad(Ctx* c)
         // 普通地图（101~109）默认营地起始；勾了翼龙起始就不改
         if (stage > 100 && stage <= 109 && g.optWyvern != 1) Wr<std::uint32_t>(r + 0x28F8, 1);
         g.restart = 0;
+        ::InterlockedIncrement(&g_evDepart);
         return;
     }
     if (g.restart != 3 || !ui) return;
@@ -211,6 +218,7 @@ void OnQuestLoad(Ctx* c)
     Wr<std::uint8_t>(o + 0x2298, 0xC9);
     Wr<std::uint32_t>(o + 0x1D04, 2);
     c->rax = kQuestAcceptCmd;
+    ::InterlockedIncrement(&g_evAccept);
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +338,17 @@ bool Install(const Config& cfg, std::string& report)
     // 黑龙开局脱衣装的修复：函数开头，rsi==0 时直接返回。这是修 bug，一直开着
     {
         if (fixedOk[3]) {
+            // 前后各数一下次数（诊断用，lock inc 不碰别的寄存器，标志位随后被 test 重写）
+            auto count = [](hook::Emitter& e, volatile LONG64* p) {
+                e.b({0x50, 0x48, 0xB8}).u64(reinterpret_cast<std::uint64_t>(p))   // push rax ; mov rax,imm64
+                 .b({0xF0, 0x48, 0xFF, 0x00, 0x58});                              // lock inc qword [rax] ; pop rax
+            };
             hook::Emitter e;
-            e.b({0x48, 0x85, 0xF6, 0x75, 0x01, 0xC3})       // test rsi,rsi ; jnz +1 ; ret
-             .b({0x40, 0x53, 0x48, 0x83, 0xEC, 0x40})       // push rbx ; sub rsp,40
+            count(e, &g_mantleCalls);
+            e.b({0x48, 0x85, 0xF6, 0x75, 0x11});            // test rsi,rsi ; jnz 继续（跳过下面 17 字节）
+            count(e, &g_mantleSkips);                        // 16 字节
+            e.b({0xC3})                                      // ret
+             .b({0x40, 0x53, 0x48, 0x83, 0xEC, 0x40})       // 继续：push rbx ; sub rsp,40
              .jmpAbs(kMantleLoad + 6);
             const std::uintptr_t s = hook::Commit(e);
             if (s && hook::PatchJump(kMantleLoad, 6, s)) Log("hooked MantleLoad");
@@ -490,6 +506,40 @@ int g_pendingSetItem = 0;
 bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 int g_savedRadial = -1;   // CT 的 wassetting：套道具前「联动快捷栏」原来的值
+
+// 诊断：重开后 30 秒里，任务状态和钩子事件有变化就写日志
+constexpr ULONGLONG kTraceMs = 30000;
+ULONGLONG g_traceUntil = 0;
+struct TraceSeen {
+    std::uint32_t st = ~0u, ui = ~0u, load = ~0u;
+    std::int32_t restart = -1;
+    LONG64 mantleCalls = -1, mantleSkips = -1;
+} g_tseen;
+
+void TraceTick()
+{
+    if (::GetTickCount64() >= g_traceUntil) return;
+    const std::uintptr_t q = P(pQuest);
+    const std::uintptr_t ui = Ui();
+    const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
+    TraceSeen n = g_tseen;
+    n.st = q ? Rd<std::uint32_t>(q + 0x38) : ~0u;
+    n.ui = q ? Rd<std::uint32_t>(q + 0x54) : ~0u;
+    n.load = load ? Rd<std::uint32_t>(load + 0x1D04) : ~0u;
+    n.restart = g.restart;
+    if (n.st != g_tseen.st || n.ui != g_tseen.ui || n.load != g_tseen.load || n.restart != g_tseen.restart)
+        Log("状态：场景 %d / 柜台 %d / 读盘 %d / restart %d", (int)n.st, (int)n.ui, (int)n.load, n.restart);
+    if (LONG v = ::InterlockedExchange(&g_evEquip, 0)) Log("游戏线程：换了装备套装（%ld 次）", v);
+    if (LONG v = ::InterlockedExchange(&g_evReset, 0)) Log("游戏线程：触发了重置（%ld 次）", v);
+    if (LONG v = ::InterlockedExchange(&g_evAccept, 0)) Log("游戏线程：接了任务（%ld 次）", v);
+    if (LONG v = ::InterlockedExchange(&g_evDepart, 0)) Log("游戏线程：出发（%ld 次）", v);
+    n.mantleCalls = g_mantleCalls;
+    n.mantleSkips = g_mantleSkips;
+    if (n.mantleCalls != g_tseen.mantleCalls || n.mantleSkips != g_tseen.mantleSkips)
+        Log("衣装修复：函数共被调 %lld 次，其中 rsi=0 提前返回 %lld 次", (long long)n.mantleCalls,
+            (long long)n.mantleSkips);
+    g_tseen = n;
+}
 }
 
 // 把一套全套里的装备/道具/猫饭/任务排进待办。装备由 ApplyResetAndEquip 钩子在游戏线程里换，
@@ -510,6 +560,9 @@ void RequestRestart(const Config& cfg)
 {
     if (!g_ready) { Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log"); return; }
     if (g.restart != 0) return;
+    g_traceUntil = ::GetTickCount64() + kTraceMs;
+    g_tseen = TraceSeen();
+    Log("—— 开始跟踪 %llu 秒（诊断手柄问题）——", (unsigned long long)(kTraceMs / 1000));
     if (!cfg.activeSet.empty()) {
         if (const LoadoutSet* s = cfg.FindSet(cfg.activeSet)) QueueSet(*s);
         else Chat("Better-IN-Q：配置里没有叫「" + cfg.activeSet + "」的全套");
@@ -555,6 +608,7 @@ std::vector<NamedLoadout> ListItemLoadouts()
 // ---------------------------------------------------------------------------
 void Tick(const Config& cfg)
 {
+    TraceTick();
     const std::uintptr_t uib = P(pUiBase);
     if (!uib) return;
     const std::uintptr_t pui = P(uib + 0x278);
@@ -566,6 +620,7 @@ void Tick(const Config& cfg)
     // 上一拍为套道具临时改的「联动快捷栏」，这一拍改回去。只动 1 个字节：
     // CT 按 4 字节读写这个奇数偏移，会把后面 3 个字节一起覆盖成 0。
     if (g_savedRadial != -1 && slot) {
+        Log("联动快捷栏改回 %d（改之前读到 %d）", g_savedRadial, Rd<std::uint8_t>(slot + 0x140415));
         Wr<std::uint8_t>(slot + 0x140415, (std::uint8_t)g_savedRadial);
         g_savedRadial = -1;
     }
@@ -595,7 +650,8 @@ void Tick(const Config& cfg)
             Wr<std::uint64_t>(uib + 0x4FE0, kItemLoadoutCmd2);
             Wr<std::uint64_t>(uib + 0x5018, uib + 0x4FE0);
             Wr<std::uint64_t>(uib + 0x8F60, 1);
-            Log("item loadout %d 已提交（联动快捷栏 %d）", n, g_savedRadial == -1 ? -1 : (g_pendingLink ? 1 : 2));
+            Log("item loadout %d 已提交（联动快捷栏 %d，原值 %d）", n, g_savedRadial == -1 ? -1 : (g_pendingLink ? 1 : 2),
+                g_savedRadial);
         } else {
             Chat("Better-IN-Q：道具套装 " + std::to_string(n) + " 是空的");
         }

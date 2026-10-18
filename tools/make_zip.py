@@ -7,7 +7,7 @@
 # 以后用盒子更新/卸载都不会冲掉玩家改过的设置。
 import hashlib, os, sys, zipfile
 
-VER = 'v0.6.0'
+VER = 'v0.6.2'
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'out')
 ZIP = os.path.join(OUT_DIR, 'Better-IN-Q %s.zip' % VER)

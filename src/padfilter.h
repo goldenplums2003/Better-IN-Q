@@ -23,6 +23,11 @@ bool Installed();
 void SetBlock(bool block);            // 面板开着 → 挡住全部输入
 void SetChord(unsigned short mask);   // 面板组合键里的手柄按钮（XINPUT_GAMEPAD_* 位），0 = 不扣
 
+// 诊断：接下来 ms 毫秒里，游戏每次读到的按键有变化就记下来（重开时调）。
+// 记录在游戏线程里只排队，FlushTrace（主循环里调）才写进日志。
+void Trace(unsigned long ms);
+void FlushTrace();
+
 // 测试用：直接对一份手柄状态跑一遍过滤（不经过 XInput）
 void TestFilter(unsigned long pad, void* xinputState);
 

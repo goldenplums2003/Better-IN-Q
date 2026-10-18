@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 namespace padfilter {
 namespace {
@@ -83,10 +85,88 @@ void Filter(DWORD i, XINPUT_STATE* s)
     if (p.pulse > 0) { g.wButtons |= p.pulseMask; --p.pulse; }
 }
 
+// ---- 诊断：重开后一段时间里，把游戏每次读到的按键变化写进日志 ----
+std::atomic<ULONGLONG> g_traceUntil{0};
+std::atomic<unsigned> g_traceGen{0};
+struct Seen {
+    unsigned gen = 0;
+    DWORD r = 0;
+    unsigned raw = 0, out = 0;
+    unsigned calls = 0;
+    ULONGLONG lastReport = 0;
+};
+Seen g_seen[XUSER_MAX_COUNT];
+
+unsigned Mask(const XINPUT_GAMEPAD& g)
+{
+    return g.wButtons | (g.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD ? 1u << 16 : 0) |
+           (g.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD ? 1u << 17 : 0);
+}
+
+std::string Names(unsigned m)
+{
+    static const struct { unsigned bit; const char* name; } kNames[] = {
+        {XINPUT_GAMEPAD_A, "A"}, {XINPUT_GAMEPAD_B, "B"}, {XINPUT_GAMEPAD_X, "X"}, {XINPUT_GAMEPAD_Y, "Y"},
+        {XINPUT_GAMEPAD_LEFT_SHOULDER, "LB"}, {XINPUT_GAMEPAD_RIGHT_SHOULDER, "RB"}, {1u << 16, "LT"}, {1u << 17, "RT"},
+        {XINPUT_GAMEPAD_BACK, "View"}, {XINPUT_GAMEPAD_START, "Menu"},
+        {XINPUT_GAMEPAD_LEFT_THUMB, "LS"}, {XINPUT_GAMEPAD_RIGHT_THUMB, "RS"},
+        {XINPUT_GAMEPAD_DPAD_UP, "上"}, {XINPUT_GAMEPAD_DPAD_DOWN, "下"},
+        {XINPUT_GAMEPAD_DPAD_LEFT, "左"}, {XINPUT_GAMEPAD_DPAD_RIGHT, "右"},
+    };
+    std::string s;
+    for (const auto& n : kNames)
+        if (m & n.bit) { if (!s.empty()) s += '+'; s += n.name; }
+    if (m & 0x0400) s += s.empty() ? "Guide" : "+Guide";
+    return s.empty() ? "-" : s;
+}
+
+// 游戏线程里只排队，主循环（FlushTrace）再写文件，免得在游戏读手柄的线程里做磁盘 IO
+struct Ev {
+    DWORD pad, r;
+    unsigned raw, out, calls;
+    bool report;   // true = 「5 秒内被读了几次」
+};
+std::mutex g_evMx;
+std::vector<Ev> g_ev;
+
+void Push(const Ev& e)
+{
+    if (!g_evMx.try_lock()) return;   // 主循环正在取：丢这一条，不让游戏线程等
+    if (g_ev.size() < 256) g_ev.push_back(e);
+    g_evMx.unlock();
+}
+
+void TraceRead(DWORD i, DWORD r, unsigned raw, const XINPUT_STATE* s)
+{
+    if (i >= XUSER_MAX_COUNT) return;
+    const ULONGLONG now = ::GetTickCount64();
+    if (now >= g_traceUntil.load()) return;
+    Seen& t = g_seen[i];
+    const unsigned gen = g_traceGen.load();
+    const unsigned out = (r == ERROR_SUCCESS && s) ? Mask(s->Gamepad) : 0;
+    const bool fresh = t.gen != gen;
+    ++t.calls;
+    if (fresh || r != t.r || raw != t.raw || out != t.out) {
+        if (r == ERROR_SUCCESS || fresh || r != t.r) Push({i, r, raw, out, 0, false});
+        if (fresh) { t.calls = 1; t.lastReport = now; }
+        t.gen = gen;
+        t.r = r;
+        t.raw = raw;
+        t.out = out;
+    }
+    if (r == ERROR_SUCCESS && now - t.lastReport >= 5000) {   // 游戏还在不在读手柄
+        Push({i, r, 0, 0, t.calls, true});
+        t.calls = 0;
+        t.lastReport = now;
+    }
+}
+
 template <int K> DWORD WINAPI HkGetState(DWORD i, XINPUT_STATE* s)
 {
     const DWORD r = g_orig[K](i, s);
+    const unsigned raw = (r == ERROR_SUCCESS && s) ? Mask(s->Gamepad) : 0;
     if (r == ERROR_SUCCESS) Filter(i, s);
+    TraceRead(i, r, raw, s);
     return r;
 }
 
@@ -142,5 +222,26 @@ bool Installed() { return g_installed; }
 void TestFilter(unsigned long pad, void* s) { Filter(pad, static_cast<XINPUT_STATE*>(s)); }
 void SetBlock(bool block) { g_block = block; }
 void SetChord(unsigned short mask) { g_chord = mask; }
+void Trace(unsigned long ms)
+{
+    ++g_traceGen;
+    g_traceUntil = ::GetTickCount64() + ms;
+}
+
+void FlushTrace()
+{
+    std::vector<Ev> ev;
+    {
+        std::lock_guard<std::mutex> lk(g_evMx);
+        if (g_ev.empty()) return;
+        ev.swap(g_ev);
+    }
+    for (const Ev& e : ev) {
+        if (e.report) Log("pad%lu 5 秒内被游戏读了 %u 次", e.pad, e.calls);
+        else if (e.r != ERROR_SUCCESS) Log("pad%lu 游戏读：没连接（%lu）", e.pad, e.r);
+        else if (e.raw == e.out) Log("pad%lu 游戏读到 %s", e.pad, Names(e.out).c_str());
+        else Log("pad%lu 手柄 %s → 游戏读到 %s", e.pad, Names(e.raw).c_str(), Names(e.out).c_str());
+    }
+}
 
 } // namespace padfilter

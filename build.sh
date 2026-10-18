@@ -24,10 +24,10 @@ if [ "$WHAT" = "dll" ] || [ "$WHAT" = "all" ]; then
     imgui_objs
     g++ -shared $COMMON -s -I$IM -o out/BetterINQ.dll \
         src/main.cpp src/inq.cpp src/hook.cpp src/config.cpp src/input.cpp src/log.cpp \
-        src/ui.cpp src/gamedata.cpp src/overlay.cpp src/padfilter.cpp src/cursorfilter.cpp \
+        src/ui.cpp src/gamedata.cpp src/overlay.cpp src/padfilter.cpp src/cursorfilter.cpp src/kbmfilter.cpp \
         out/obj/imgui.o out/obj/imgui_draw.o out/obj/imgui_tables.o out/obj/imgui_widgets.o \
         out/obj/imgui_impl_dx11.o out/obj/imgui_impl_dx12.o out/obj/imgui_impl_win32.o \
-        -ld3d11 -ld3dcompiler -ldxgi -ldwmapi -limm32 -lgdi32 -lole32 -luuid
+        -ld3d11 -ld3dcompiler -ldxgi -ldwmapi -limm32 -lgdi32 -lole32 -luuid -ldxguid
     ls -l out/BetterINQ.dll
 fi
 
@@ -36,6 +36,7 @@ if [ "$WHAT" = "test" ] || [ "$WHAT" = "all" ]; then
     g++ $COMMON -o out/hook_test.exe tests/hook_test.cpp src/hook.cpp
     g++ $COMMON -o out/config_test.exe tests/config_test.cpp src/config.cpp src/input.cpp
     g++ $COMMON -Isrc -o out/cursor_test.exe tests/cursor_test.cpp src/cursorfilter.cpp src/hook.cpp src/log.cpp
+    g++ $COMMON -Isrc -o out/kbm_test.exe tests/kbm_test.cpp src/kbmfilter.cpp src/hook.cpp src/log.cpp -ldxguid
     imgui_objs
     g++ $COMMON -municode -I$IM -Isrc -o out/overlay_test.exe tests/overlay_test.cpp \
         src/overlay.cpp src/padfilter.cpp src/ui.cpp src/gamedata.cpp src/config.cpp src/input.cpp src/log.cpp src/hook.cpp \
@@ -53,6 +54,7 @@ if [ "$WHAT" = "test" ] || [ "$WHAT" = "all" ]; then
     ./out/hook_test.exe
     ./out/config_test.exe
     ./out/cursor_test.exe
+    ./out/kbm_test.exe
     ./out/overlay_test.exe "$(cygpath -w "$PWD/out")"
     ./out/overlay_dx12_test.exe "$(cygpath -w "$PWD/out")"
     ./out/ui_nav_test.exe

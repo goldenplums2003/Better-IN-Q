@@ -9,6 +9,7 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <imm.h>
 #include <atomic>
 #include <vector>
 
@@ -75,9 +76,31 @@ ID3D12CommandAllocator* g_alloc[kMaxBuffers] = {};
 UINT64 g_allocFence[kMaxBuffers] = {};
 DXGI_FORMAT g_bbFormat = DXGI_FORMAT_UNKNOWN;
 
-// 面板开着时把键鼠消息吃掉，游戏收不到（手柄另由 padfilter 挡）
+// 面板开着时把输入法从游戏窗口上摘掉，关面板再还回去。搜任务打的是拼音字母，中文输入法
+// 开着会把字母吃进候选框（全屏时候选框还看不见），面板就收不到字。游戏自己也会挂输入法
+//（聊天框），所以开着期间每次按键前都再摘一次，记下最新的那个。
+// Imm* 要在窗口所在的线程里调，所以放在 WndProc 里做（SetOpen 会补发一条 WM_NULL 触发）。
+HIMC g_savedImc = nullptr;
+bool g_imeOff = false;
+
+void SyncIme(HWND h, UINT msg, bool open)
+{
+    if (open) {
+        if (!g_imeOff || msg == WM_KEYDOWN || msg == WM_INPUTLANGCHANGE || msg == WM_IME_STARTCOMPOSITION) {
+            if (HIMC prev = ::ImmAssociateContext(h, nullptr)) g_savedImc = prev;
+            g_imeOff = true;
+        }
+    } else if (g_imeOff) {
+        if (g_savedImc) ::ImmAssociateContext(h, g_savedImc);
+        g_savedImc = nullptr;
+        g_imeOff = false;
+    }
+}
+
+// 面板开着时把键鼠消息吃掉，游戏收不到（手柄另由 padfilter 挡，DirectInput 和按键查询由 kbmfilter 挡）
 LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
+    SyncIme(h, msg, g_open.load());
     if (g_open.load()) {
         ImGui_ImplWin32_WndProcHandler(h, msg, w, l);
         switch (msg) {
@@ -321,6 +344,7 @@ int InitRenderer(IDXGISwapChain* sc)
     }
     if (g_cb.init) g_cb.init(h > 0 ? h / 1080.0f : 1.0f);
     g_wndProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
+    ::PostMessageW(g_hwnd, WM_NULL, 0, 0);   // 让 WndProc 马上跑一次，先把输入法摘掉
     g_inited = true;
     Log("overlay: 就绪（%s，窗口 %ldx%ld，缓冲 %ux%u x%u，格式 %d）", g_api == kD3D11 ? "D3D11" : "D3D12",
         rc.right - rc.left, rc.bottom - rc.top, d.BufferDesc.Width, d.BufferDesc.Height, d.BufferCount, (int)d.BufferDesc.Format);
@@ -514,6 +538,7 @@ void SetOpen(bool open)
 {
     if (open && !g_open.load()) g_openAt = ::GetTickCount64();
     g_open = open && !g_failed.load();
+    if (g_wndProc && g_hwnd) ::PostMessageW(g_hwnd, WM_NULL, 0, 0);   // 输入法摘下 / 还回去
 }
 bool IsOpen() { return g_open.load() && !g_failed.load(); }
 bool Failed() { return g_failed.load(); }

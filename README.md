@@ -17,7 +17,7 @@ Better-IN-Q 只在界面、bug 修复和使用体验上做了优化，没有参�
 - 一键重开当前任务（默认手柄 LB+RB+LT+RT），可选直接重开 / 重置后回据点再接 / 只接任务不出发
 - 重开时自动套用「全套」：装备套装、道具套装、猫饭、任务
 - 游戏内面板（默认 视图键+菜单键，或键盘 Insert）：换任务（支持拼音 / 首字母搜索）、换套装、换猫饭、设置
-- 面板开着时游戏收不到手柄和键鼠输入，鼠标可以自由点面板
+- 面板开着时游戏收不到手柄和键鼠输入（窗口消息、DirectInput、按键查询都挡），鼠标可以自由点面板；输入法暂时关掉，直接打拼音
 - 相比原版 IN-Q：做成插件，不再有「开游戏检测不到」；修了道具套装排过序后套错的问题；修了黑龙开局脱衣装
 
 ## 安装（玩家）
@@ -52,7 +52,7 @@ py -3 tools/make_zip.py   # 打发布包
 | `src/hook.*` | 往游戏代码里插跳转、按值换函数指针 |
 | `src/overlay.*` | 挂 DXGI Present，用 Dear ImGui 画面板（D3D11 / D3D12） |
 | `src/ui.*` | 面板界面 |
-| `src/padfilter.*` / `src/cursorfilter.*` | 面板开着时挡住游戏的手柄输入、不让游戏拽鼠标 |
+| `src/padfilter.*` / `src/kbmfilter.*` / `src/cursorfilter.*` | 面板开着时挡住游戏的手柄、键盘鼠标输入，不让游戏拽鼠标 |
 | `src/config.*` / `src/input.*` / `src/gamedata.*` | 配置文件、快捷键、任务表 |
 | `tests/` | 单元测试（`build.sh all` 会跑） |
 | `third_party/imgui/` | [Dear ImGui](https://github.com/ocornut/imgui)（MIT 许可，见其中的 LICENSE.txt） |

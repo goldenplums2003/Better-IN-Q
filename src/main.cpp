@@ -10,6 +10,7 @@
 #include "config.h"
 #include "cursorfilter.h"
 #include "inq.h"
+#include "kbmfilter.h"
 #include "input.h"
 #include "log.h"
 #include "overlay.h"
@@ -20,7 +21,7 @@ namespace {
 
 HMODULE g_module = nullptr;
 volatile LONG g_stop = 0;
-const char* const kVersion = "0.6.0";
+const char* const kVersion = "0.6.2";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -96,6 +97,7 @@ void SetPanel(bool open)
     g_blocked = overlay::IsOpen();
     padfilter::SetBlock(g_blocked);
     cursorfilter::SetBlock(g_blocked);
+    kbmfilter::SetBlock(g_blocked);
 }
 
 // 手柄、光标过滤：游戏的 XInput 可能晚一点才加载，装不上就隔两秒再试，最多试 2 分钟
@@ -165,7 +167,8 @@ DWORD WINAPI Worker(LPVOID)
     else Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log");
 
     Filter filters[] = {{"padfilter", padfilter::Install, padfilter::Installed},
-                        {"cursorfilter", cursorfilter::Install, cursorfilter::Installed}};
+                        {"cursorfilter", cursorfilter::Install, cursorfilter::Installed},
+                        {"kbmfilter", kbmfilter::Install, kbmfilter::Installed}};
     ULONGLONG lastTick = 0, dirtyAt = 0;
     while (!g_stop) {
         const ULONGLONG now = ::GetTickCount64();
@@ -194,11 +197,11 @@ DWORD WINAPI Worker(LPVOID)
 
         {
             std::lock_guard<std::mutex> lk(g_mx);
-            if (!open && restartKey) { Log("hotkey: restart"); inq::RequestRestart(g_cfg); }
+            if (!open && restartKey) { Log("hotkey: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
 
             ui::Model& m = g_model;
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
-            if (m.reqRestart) { m.reqRestart = false; Log("panel: restart"); inq::RequestRestart(g_cfg); }
+            if (m.reqRestart) { m.reqRestart = false; Log("panel: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
             if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
                 m.reqSave = false;
                 inq::ApplyOptions(g_cfg);
@@ -222,6 +225,7 @@ DWORD WINAPI Worker(LPVOID)
                 m.status = LastChat(6000);
             }
         }
+        padfilter::FlushTrace();
         FlushChat();
         ::Sleep(16);
     }

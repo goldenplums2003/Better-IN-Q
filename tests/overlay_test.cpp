@@ -1,6 +1,7 @@
 // 在游戏外模拟「游戏每帧 Present」，测面板挂载、改分辨率，以及手柄过滤器。
 //   overlay_test.exe <输出目录>
 #include <windows.h>
+#include <imm.h>
 #include <d3d11.h>
 #include <wincodec.h>
 #include <xinput.h>
@@ -169,12 +170,23 @@ int wmain(int argc, wchar_t** argv)
 
     for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
     CHECK(g_draws == 0, "面板关着：一次都没画");
+    auto pump = [] {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+    };
+    HIMC imc0 = ImmGetContext(hw);   // 窗口原来挂的输入法（系统没装输入法时是空的）
+    if (imc0) ImmReleaseContext(hw, imc0);
     overlay::SetOpen(true);
     for (int i = 0; i < 6; ++i) {
         if (i == 5) g_shot = out + L"\\overlay_1080p.png";
         frame(0.25f, 0.35f, 0.25f);
     }
     CHECK(g_opened == 1 && g_draws == 6, "打开后每帧都画（opened=%d draws=%d）", g_opened, g_draws);
+    // 输入法：面板开着时从窗口上摘掉（拼音字母直接进搜索框，不被候选框吃掉），关面板还回去
+    pump();
+    HIMC imcOpen = ImmGetContext(hw);
+    CHECK(!imcOpen, "面板开着：游戏窗口上没挂输入法（原来%s）", imc0 ? "挂着" : "就没有");
+    if (imcOpen) ImmReleaseContext(hw, imcOpen);
 
     // 看样子用：设置页拉到底（快捷键那几格），以及从设置页切回主页途中的一帧
     ui::DebugGo(6, 0);
@@ -232,6 +244,10 @@ int wmain(int argc, wchar_t** argv)
     overlay::SetOpen(false);
     frame(0, 0, 0);
     CHECK(g_draws == drawsBefore + 4, "关掉后不再画");
+    pump();
+    HIMC imc1 = ImmGetContext(hw);
+    CHECK(imc1 == imc0, "关面板：输入法还回去了");
+    if (imc1) ImmReleaseContext(hw, imc1);
 
     sc->Release(); ctx->Release(); g_dev->Release();
     DestroyWindow(hw);
