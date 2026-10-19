@@ -21,7 +21,7 @@ namespace {
 
 HMODULE g_module = nullptr;
 volatile LONG g_stop = 0;
-const char* const kVersion = "0.6.2";
+const char* const kVersion = "0.6.3";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -123,6 +123,7 @@ DWORD WINAPI Worker(LPVOID)
 {
     while (!::GetModuleHandleW(L"MonsterHunterWorld.exe") && !g_stop) ::Sleep(200);
     if (g_stop) return 0;
+    inq::ReserveArena();
 
     const std::wstring dir = ModuleDir() + L"BetterINQ\\";
     const std::wstring cfgPath = dir + L"BetterINQ.ini";

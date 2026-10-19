@@ -266,6 +266,13 @@ template <class T> bool PatchValue(std::uintptr_t a, T expect, T to, const char*
 
 bool Ready() { return g_ready; }
 
+void ReserveArena()
+{
+    std::uintptr_t tb = 0;
+    std::size_t tl = 0;
+    if (hook::TextRange(EXE, tb, tl)) hook::InitArena(tb, tb + tl);
+}
+
 bool Install(const Config& cfg, std::string& report)
 {
     report.clear();
@@ -292,8 +299,12 @@ bool Install(const Config& cfg, std::string& report)
     ::Sleep(1500);   // 让同时启动的别的模组先打完它们的补丁，再看现场
     Log("代码段就绪（等了 %llu ms）", (unsigned long long)(::GetTickCount64() - t0));
 
-    if (!hook::InitArena(tb, tb + tl)) { report = "在游戏模块附近要不到内存"; return false; }
-    Log("arena = %p", (void*)hook::ArenaBase());
+    if (!hook::InitArena(tb, tb + tl)) { report = "要不到可执行内存"; return false; }
+    if (hook::ArenaFar())
+        Log("arena = %p（游戏模块附近已经没有空地址，挂钩改走 .text 尾部的跳板，跳板区 %zu 字节）",
+            (void*)hook::ArenaBase(), hook::CaveFree());
+    else
+        Log("arena = %p", (void*)hook::ArenaBase());
 
     bool core = true;
     auto need = [&](bool ok, const char* name, const std::string& why) {

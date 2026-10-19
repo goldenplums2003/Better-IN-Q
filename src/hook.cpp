@@ -11,7 +11,52 @@ namespace {
 std::uintptr_t g_arena = 0;
 std::size_t g_arenaSize = 0;
 std::size_t g_arenaUsed = 0;
+bool g_far = false;
+// 跳板区：[g_caveLo, g_caveNext + 16) 还没用，从高往低分（别的工具找空白一般从低往高）
+std::uintptr_t g_caveLo = 0, g_caveNext = 0;
 std::mutex g_mx;
+
+bool AllZero(std::uintptr_t a, std::size_t n)
+{
+    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(a);
+    for (std::size_t i = 0; i < n; ++i)
+        if (p[i]) return false;
+    return true;
+}
+
+// .text 的 VirtualSize 之后到页尾：映射成和代码一样可执行、内容是 0、镜像里没人用
+void SetCaveAfter(std::uintptr_t hi)
+{
+    const std::uintptr_t lo = (hi + 16 + 15) & ~std::uintptr_t(15);   // 和最后一条指令隔开 16 字节
+    const std::uintptr_t end = (hi + 0xFFF) & ~std::uintptr_t(0xFFF);
+    MEMORY_BASIC_INFORMATION mbi{};
+    const bool exec = ::VirtualQuery(reinterpret_cast<void*>(hi), &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+                      (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+    if (!exec || end < lo + 16) { g_caveLo = g_caveNext = 0; return; }
+    g_caveLo = lo;
+    g_caveNext = end - 16;
+}
+
+// 在跳板区放一条远跳，返回跳板地址（0 = 没地方了）。调用方持锁。
+std::uintptr_t RelayLocked(std::uintptr_t to)
+{
+    for (; g_caveLo && g_caveNext >= g_caveLo; g_caveNext -= 16) {
+        const std::uintptr_t a = g_caveNext;
+        if (!AllZero(a, 16)) continue;   // 被别人用了：跳过
+        std::uint8_t r[16] = {0xFF, 0x25, 0, 0, 0, 0};   // jmp [rip+0]
+        std::memcpy(r + 6, &to, 8);
+        r[14] = r[15] = 0xCC;
+        DWORD old = 0;
+        if (!::VirtualProtect(reinterpret_cast<void*>(a), 16, PAGE_EXECUTE_READWRITE, &old)) return 0;
+        std::memcpy(reinterpret_cast<void*>(a), r, 16);
+        DWORD tmp = 0;
+        ::VirtualProtect(reinterpret_cast<void*>(a), 16, old, &tmp);
+        ::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(a), 16);
+        g_caveNext -= 16;
+        return a;
+    }
+    return 0;
+}
 
 bool InRel32(std::uintptr_t from, std::uintptr_t to)
 {
@@ -36,7 +81,7 @@ int HexNibble(char c)
 
 } // namespace
 
-bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size)
+bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size, bool forceFar)
 {
     std::lock_guard<std::mutex> lk(g_mx);
     if (g_arena) return true;
@@ -46,17 +91,24 @@ bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size)
 
     // 先往模块下面找（CT 用的就是 0x13FF80000），再往上面找。整段都要在 rel32 内。
     const std::uintptr_t span = 0x70000000;   // 留余量，别贴着 2GB 边
-    for (std::uintptr_t a = (lo - gran) & ~(gran - 1); a > gran && lo - a < span; a -= gran) {
+    for (std::uintptr_t a = (lo - gran) & ~(gran - 1); !forceFar && a > gran && lo - a < span; a -= gran) {
         if (!InRel32(a, hi) || !InRel32(a + size, lo)) continue;
         if (std::uintptr_t p = TryAllocAt(a, size)) { g_arena = p; break; }
     }
-    if (!g_arena) {
+    if (!g_arena && !forceFar) {
         for (std::uintptr_t a = (hi + gran) & ~(gran - 1); a - hi < span; a += gran) {
             if (!InRel32(lo, a + size)) break;
             if (std::uintptr_t p = TryAllocAt(a, size)) { g_arena = p; break; }
         }
     }
-    if (!g_arena) return false;
+    if (!g_arena) {
+        // 附近全被占了（游戏起来后会一大片一大片地预留）：内存随便放，挂钩走 .text 尾部的跳板
+        g_arena = reinterpret_cast<std::uintptr_t>(
+            ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE));
+        if (!g_arena) return false;
+        g_far = true;
+        SetCaveAfter(hi);
+    }
     g_arenaSize = size;
     g_arenaUsed = 0;
     std::memset(reinterpret_cast<void*>(g_arena), 0xCC, size);
@@ -64,6 +116,20 @@ bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size)
 }
 
 std::uintptr_t ArenaBase() { return g_arena; }
+bool ArenaFar() { return g_far; }
+
+std::size_t CaveFree()
+{
+    std::lock_guard<std::mutex> lk(g_mx);
+    return (g_caveLo && g_caveNext >= g_caveLo) ? g_caveNext + 16 - g_caveLo : 0;
+}
+
+void TestSetCave(std::uintptr_t lo, std::uintptr_t hi)
+{
+    std::lock_guard<std::mutex> lk(g_mx);
+    g_caveLo = (lo + 15) & ~std::uintptr_t(15);
+    g_caveNext = (hi & ~std::uintptr_t(15)) - 16;
+}
 
 std::uintptr_t Commit(const Emitter& e)
 {
@@ -90,7 +156,12 @@ bool WriteMem(std::uintptr_t addr, const void* bytes, std::size_t n)
 
 bool PatchJump(std::uintptr_t site, std::size_t len, std::uintptr_t stub)
 {
-    if (len < 5 || len > 16 || !stub || !InRel32(site + 5, stub)) return false;
+    if (len < 5 || len > 16 || !stub) return false;
+    if (!InRel32(site + 5, stub)) {   // arena 太远：经 .text 尾部的跳板过去
+        std::lock_guard<std::mutex> lk(g_mx);
+        stub = RelayLocked(stub);
+        if (!stub || !InRel32(site + 5, stub)) return false;
+    }
     std::uint8_t p[16];
     p[0] = 0xE9;
     const std::int32_t rel = (std::int32_t)((std::int64_t)stub - (std::int64_t)(site + 5));

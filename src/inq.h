@@ -33,6 +33,8 @@ extern State g;
 // 等游戏代码解密后核对字节、装钩子。report 是给人看的结果（写日志、发聊天框）。
 // 返回 false = 核心钩子没装上，重开功能不可用。
 bool Install(const Config& cfg, std::string& report);
+// 插件一加载就调：趁游戏还没把模块附近的地址占满，先把挂钩要的那块内存要下来
+void ReserveArena();
 bool Ready();
 
 // 重开（快捷键或面板）。会先套用 Active 那套全套配置。重开方式看配置里的 Reset / AcceptOnly。

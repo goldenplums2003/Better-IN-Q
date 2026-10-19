@@ -23,9 +23,16 @@ struct Ctx {
 };
 using Handler = void (*)(Ctx*);
 
-// 在 [lo, hi) 这段模块的 ±2GB 内要一块可执行内存。只需调一次。
-bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size = 0x4000);
+// 在 [lo, hi)（模块的 .text）±2GB 内要一块可执行内存。只需调一次，越早越好：
+// 游戏起来后会把模块附近的地址一大片一大片地占掉。
+// 附近实在要不到时，内存随便放，改用跳板：.text 尾部（hi 到页尾）那段没用的空白里
+// 放 14 字节的「jmp [rip+0] ; 目标」，挂钩点先 rel32 跳到跳板，跳板再远跳进 arena。
+// forceFar 只给测试用。
+bool InitArena(std::uintptr_t lo, std::uintptr_t hi, std::size_t size = 0x4000, bool forceFar = false);
 std::uintptr_t ArenaBase();
+bool ArenaFar();                       // arena 不在 rel32 范围内（挂钩要走跳板）
+std::size_t CaveFree();                // 跳板区还剩多少字节
+void TestSetCave(std::uintptr_t lo, std::uintptr_t hi);   // 测试用：指定跳板区
 
 // 往 arena 里写机器码的小工具
 class Emitter {

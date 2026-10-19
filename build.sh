@@ -52,6 +52,7 @@ if [ "$WHAT" = "test" ] || [ "$WHAT" = "all" ]; then
         out/obj/imgui.o out/obj/imgui_draw.o out/obj/imgui_tables.o out/obj/imgui_widgets.o out/obj/imgui_impl_dx11.o \
         -ld3d11 -ld3dcompiler
     ./out/hook_test.exe
+    ./out/hook_test.exe --far
     ./out/config_test.exe
     ./out/cursor_test.exe
     ./out/kbm_test.exe
