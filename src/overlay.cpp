@@ -125,7 +125,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
     SyncIme(h, msg, g_open.load());
     if (g_open.load()) {
-        ImGui_ImplWin32_WndProcHandler(h, msg, w, l);
+        const LRESULT im = ImGui_ImplWin32_WndProcHandler(h, msg, w, l);
         switch (msg) {
         case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: case WM_CHAR:
         case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP:
@@ -136,8 +136,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
             return ::DefWindowProcW(h, msg, w, l);   // 原始输入：交给系统收尾，不给游戏
         }
         // 输入法的消息交给系统默认处理：组字、候选框照常显示，打完的字变成 WM_CHAR 进面板。
-        // 不给游戏（游戏会当成聊天框在打字）
-        if (IsImeMessage(msg)) return ::DefWindowProcW(h, msg, w, l);
+        // 不给游戏（游戏会当成聊天框在打字）。
+        // WM_IME_COMPOSITION 在 ImGui 的处理里已经调过一次 DefWindowProc，再调一次，同一个词就会
+        // 进两遍（打 heilong 选「黑龙」出来「黑龙黑龙」）；非 Unicode 窗口的 WM_IME_CHAR 它也自己收了
+        if (IsImeMessage(msg)) {
+            if (msg == WM_IME_COMPOSITION || (msg == WM_IME_CHAR && im)) return im;
+            return ::DefWindowProcW(h, msg, w, l);
+        }
     }
     return ::CallWindowProcW(g_wndProc, h, msg, w, l);
 }
