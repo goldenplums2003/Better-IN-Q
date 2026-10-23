@@ -21,7 +21,7 @@ namespace {
 
 HMODULE g_module = nullptr;
 volatile LONG g_stop = 0;
-const char* const kVersion = "0.6.3";
+const char* const kVersion = "0.6.4";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -68,22 +68,26 @@ void OnOverlayDraw(float w, float h)
 {
     std::lock_guard<std::mutex> lk(g_mx);
     ui::Draw(g_model, w, h);
+    overlay::SetImeWanted(g_model.wantIme);   // 在打名字：把输入法挂回来，能打中文
 }
 
 struct Hotkeys {
-    Hotkey restart, panel;
-    std::string specs[2];
+    Hotkey restart, resetOnly, panel;
+    std::string specs[3];
     bool parsed = false;
     // 存盘时也会调：快捷键没变就不重新解析（按键的按下状态要保留，不然按着时存盘会误触发）
     void Parse(const Config& c)
     {
-        if (parsed && specs[0] == c.hkRestart && specs[1] == c.hkPanel) return;
+        if (parsed && specs[0] == c.hkRestart && specs[1] == c.hkResetOnly && specs[2] == c.hkPanel) return;
         parsed = true;
         specs[0] = c.hkRestart;
-        specs[1] = c.hkPanel;
+        specs[1] = c.hkResetOnly;
+        specs[2] = c.hkPanel;
         restart = ParseHotkey(c.hkRestart);
+        resetOnly = ParseHotkey(c.hkResetOnly);
         panel = ParseHotkey(c.hkPanel);
         LogHotkey("Restart", c.hkRestart, restart);
+        LogHotkey("ResetOnly", c.hkResetOnly, resetOnly);
         LogHotkey("Panel", c.hkPanel, panel);
         padfilter::SetChord(PadButtons(panel));
     }
@@ -195,10 +199,12 @@ DWORD WINAPI Worker(LPVOID)
         }
         const bool open = overlay::IsOpen();
         const bool restartKey = in.Fired(hk.restart);       // 面板开着时不响应，免得在面板里误触
+        const bool resetKey = in.Fired(hk.resetOnly);
 
         {
             std::lock_guard<std::mutex> lk(g_mx);
             if (!open && restartKey) { Log("hotkey: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
+            if (!open && resetKey) { Log("hotkey: reset only"); padfilter::Trace(30000); inq::RequestRestart(g_cfg, true); }
 
             ui::Model& m = g_model;
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }

@@ -62,7 +62,13 @@ static void Save(void* tex)
 
 static void OnInit(float scale) { ui::Init(scale); }
 static void OnOpened() { ui::OnOpen(g_model); ++g_opened; }
-static void OnDraw(float w, float h) { ui::Draw(g_model, w, h); ++g_draws; }
+// 和插件里一样：画完把「要不要输入法」告诉 overlay
+static void OnDraw(float w, float h)
+{
+    ui::Draw(g_model, w, h);
+    overlay::SetImeWanted(g_model.wantIme);
+    ++g_draws;
+}
 
 static void Pad(XINPUT_STATE& s, WORD buttons) { std::memset(&s, 0, sizeof(s)); s.Gamepad.wButtons = buttons; }
 
@@ -187,6 +193,36 @@ int wmain(int argc, wchar_t** argv)
     HIMC imcOpen = ImmGetContext(hw);
     CHECK(!imcOpen, "面板开着：游戏窗口上没挂输入法（原来%s）", imc0 ? "挂着" : "就没有");
     if (imcOpen) ImmReleaseContext(hw, imcOpen);
+
+    // 猫饭改名：名字框打字时把输入法挂上，输入法打完的字（WM_IME_CHAR）进名字框；打完再摘掉
+    if (!g_cfg.foods.empty()) {
+        const int fid = g_cfg.foods.begin()->first;
+        const std::string nameBefore = g_cfg.foods[fid].name;
+        ui::DebugGo(5, fid);
+        for (int i = 0; i < 4; ++i) frame(0.25f, 0.35f, 0.25f);
+        ui::DebugFocusFoodName();
+        for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
+        pump();
+        HIMC on = ImmGetContext(hw);
+        CHECK(on || !imc0, "名字框在打字：游戏窗口挂上了输入法（系统%s输入法）", imc0 ? "有" : "没有");
+        if (on) ImmReleaseContext(hw, on);
+        SendMessageW(hw, WM_IME_CHAR, 0x732B, 1);   // 猫
+        SendMessageW(hw, WM_IME_CHAR, 0x996D, 1);   // 饭
+        pump();                                      // 系统把它们转成 WM_CHAR 放进消息队列，游戏的消息循环会取
+        for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
+        CHECK(g_cfg.foods[fid].name == "\xE7\x8C\xAB\xE9\xA5\xAD", "输入法送来的「猫饭」进了名字框（%s）",
+              g_cfg.foods[fid].name.c_str());
+        SendMessageW(hw, WM_KEYDOWN, VK_RETURN, 0x001C0001);
+        SendMessageW(hw, WM_KEYUP, VK_RETURN, 0xC01C0001);
+        for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
+        pump();
+        HIMC off = ImmGetContext(hw);
+        CHECK(!off, "回车打完：又把输入法摘掉了");
+        if (off) ImmReleaseContext(hw, off);
+        g_cfg.foods[fid].name = nameBefore;
+        ui::DebugGo(0, 0);
+        for (int i = 0; i < 4; ++i) frame(0.25f, 0.35f, 0.25f);
+    }
 
     // 看样子用：设置页拉到底（快捷键那几格），以及从设置页切回主页途中的一帧
     ui::DebugGo(6, 0);

@@ -20,6 +20,8 @@ struct Callbacks {
 
 bool Install(const Callbacks& cb, std::string& err);
 void SetOpen(bool open);
+// 面板开着时游戏窗口上默认不挂输入法（拼音字母直接进搜索框）；want = 正在打名字，要挂上
+void SetImeWanted(bool want);
 bool IsOpen();
 bool Failed();   // 渲染端初始化失败（比如游戏开的是 DX12），面板不可用；这时 IsOpen() 一直是 false
 

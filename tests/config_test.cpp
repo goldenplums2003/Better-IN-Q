@@ -148,6 +148,32 @@ int main()
     h = ParseHotkey("");
     CHECK(h.alts.empty(), "空字符串 = 不设快捷键");
 
+    // 0.6.4：任务「无」、猫饭名字、只重置回据点的快捷键，存了能原样读回来
+    {
+        Config c;
+        c.questId = kQuestNone;
+        c.hkResetOnly = "LB+RB+View | Ctrl+F5";
+        LoadoutSet s;
+        s.name = "原地";
+        s.quest = kQuestNone;
+        s.food = 2;
+        c.sets.push_back(s);
+        c.foods[2].name = "黑龙饭";
+        c.foods[2].hp = 5;
+        c.foods[3].hp = 1;                        // 没起名字的
+        const std::wstring p = L"out\\config_test_064.ini";
+        CHECK(SaveConfig(p, c), "存 0.6.4 的新字段");
+        Config r;
+        std::string err;
+        CHECK(LoadConfig(p, r, err), "读回来");
+        CHECK(r.questId == kQuestNone && r.EffectiveQuest() == kQuestNone, "全局任务「无」= %d", r.questId);
+        CHECK(r.sets.size() == 1 && r.sets[0].quest == kQuestNone, "套装里的任务「无」");
+        CHECK(r.hkResetOnly == "LB+RB+View | Ctrl+F5", "只重置回据点：%s", r.hkResetOnly.c_str());
+        CHECK(r.foods[2].name == "黑龙饭" && r.foods[2].hp == 5, "猫饭名字：%s", r.foods[2].name.c_str());
+        CHECK(r.FoodName(3) == "猫饭 3" && r.FoodName(2) == "黑龙饭", "没起名字的显示「猫饭 编号」");
+        ::DeleteFileW(p.c_str());
+    }
+
     std::printf("\n%s（%d 项失败）\n", g_fail ? "有失败" : "全部通过", g_fail);
     return g_fail ? 1 : 0;
 }

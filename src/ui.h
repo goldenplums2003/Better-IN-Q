@@ -36,6 +36,7 @@ struct Model {
     unsigned padHeld = 0;                 // 手柄（XINPUT_GAMEPAD_* 位 + kPadLT/kPadRT，见 input.h）
     std::vector<int> keysHeld;            // 键盘（只在录快捷键时填）
     bool capturing = false;               // 面板正在录快捷键：主循环别把按键当快捷键触发
+    bool wantIme = false;                 // 正在打名字：要用输入法（打中文）。别的时候面板里不挂输入法
 };
 
 // ImGui 上下文建好后调一次。scale = 屏幕高度 / 1080。
@@ -52,10 +53,12 @@ int DebugPage();
 bool DebugSidebarFocused();
 int DebugSidebarFocusIndex();   // 这一帧焦点在侧栏第几格（-1 = 不在侧栏）
 float DebugFrameHeight();       // 这一帧画出来的外框有多高（换页时有过渡）
-// 测试用：直接开始录设置页第 row 个快捷键（0 重开 1 面板）的手柄 / 键盘那一组
+// 测试用：直接开始录设置页第 row 个快捷键（0 重开 1 面板 2 只重置回据点）的手柄 / 键盘那一组
 void DebugStartCapture(Model& m, int row, bool pad);
 std::string DebugCaptureWhy();
 // 预览 / 宣传图用：往「换任务」的搜索框里填字
 void DebugSetSearch(const char* text);
+// 测试用：下一帧把键盘焦点放到猫饭编辑页的名字框上（开始打字）
+void DebugFocusFoodName();
 
 } // namespace ui

@@ -31,7 +31,7 @@ bool g_ready = false;
 volatile LONG g_evEquip = 0, g_evReset = 0, g_evAccept = 0, g_evDepart = 0;
 volatile LONG64 g_mantleCalls = 0, g_mantleSkips = 0;   // 衣装修复那个函数：被调几次 / 被我们提前返回几次
 
-enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWindow = 8 };
+enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWindow = 8, kMsgNoQuest = 16 };
 
 // ---------------------------------------------------------------------------
 //  ApplyResetAndEquip：原指令 mov rcx,rbx ; call [rax+70]
@@ -43,6 +43,7 @@ void CantQ()
 {
     g.message |= kMsgCant;
     g.restart = 0;
+    g.resetOnly = 0;
 }
 
 void OnApplyResetAndEquip(Ctx* c)
@@ -100,21 +101,34 @@ void OnApplyResetAndEquip(Ctx* c)
     if (st == 4) {                                                     // skipR：结算画面
         if (Rd<std::uint32_t>(q + 0x58) != 4) { CantQ(); return; }
         Wr<float>(q + 0x131A0, 3601.0f);                               // 把结算计时拨到头
+        if (g.resetOnly) { g.resetOnly = 0; g.restart = 0; }           // 只重置：照常回据点就完了
         return;                                                        // restart 保持 1，回据点后接着走
     }
     if (st == 5) {                                                     // skipR2
         if (Rd<std::uint32_t>(q + 0x58) != 4) { CantQ(); return; }
         Wr<std::uint32_t>(q + 0x38, 7);
         g.restart = 0;
+        g.resetOnly = 0;
+        return;
+    }
+    if ((st == 1 || st == 0xD) && g.resetOnly) {                       // 只重置，但本来就在据点 / 调查
+        g.resetOnly = 0;
+        g.restart = 0;
+        g.message |= kMsgNoQuest;
         return;
     }
     g.restart = 3;
     if (st == 1 || st == 0xD) return;                                  // 在据点 / 调查 → 直接去接任务
     if (st != 2 || Rd<std::uint32_t>(q + 0x54) != 2) { CantQ(); return; }   // 不在任务里
 
-    // optioncheck
+    // optioncheck（CT 的 Restart+6：这一次只重置 → restart 归 0，不拦回据点、也不接任务）
     g.restart = 3;
-    if (!(g.optAcceptOnly == 1 || g.optReset == 1)) g.restart = 2;   // 直接重开：拦住回据点
+    if (g.resetOnly) {
+        g.resetOnly = 0;
+        g.restart = 0;
+    } else if (!(g.optAcceptOnly == 1 || g.optReset == 1)) {
+        g.restart = 2;                                                 // 直接重开：拦住回据点
+    }
 
     // ifquest：死了的话先补满血、把动作清零，免得重置卡在倒地状态
     const std::uintptr_t pl = P(P(pPlayerA) + 0x108);
@@ -567,16 +581,42 @@ void QueueSet(const LoadoutSet& s)
     if (s.quest > 100 && s.quest < 67809) g.questId = (std::uint32_t)s.quest;
 }
 
-void RequestRestart(const Config& cfg)
+// 把猫饭结构写成预设（CT：pfood+19A4+i*4，i=1..8）。成功返回 true。
+bool WriteFood(const Config& cfg, int id)
+{
+    auto it = cfg.foods.find(id);
+    const std::uintptr_t pf = P(pFood);
+    if (it == cfg.foods.end() || !pf) return false;
+    const FoodPreset& f = it->second;
+    const std::int32_t v[8] = {f.hp, f.stamina, f.attack, f.defense, f.elemRes, f.skill[0], f.skill[1], f.skill[2]};
+    for (int i = 0; i < 8; ++i) Wr<std::int32_t>(pf + 0x19A8 + i * 4, v[i]);
+    return true;
+}
+
+void RequestRestart(const Config& cfg, bool resetOnly)
 {
     if (!g_ready) { Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log"); return; }
     if (g.restart != 0) return;
     g_traceUntil = ::GetTickCount64() + kTraceMs;
     g_tseen = TraceSeen();
     Log("—— 开始跟踪 %llu 秒（诊断手柄问题）——", (unsigned long long)(kTraceMs / 1000));
-    if (!cfg.activeSet.empty()) {
-        if (const LoadoutSet* s = cfg.FindSet(cfg.activeSet)) QueueSet(*s);
-        else Chat("Better-IN-Q：配置里没有叫「" + cfg.activeSet + "」的全套");
+    if (resetOnly) {                       // 只重置回据点：不套全套
+        g.resetOnly = 1;
+        g.restart = 1;
+        return;
+    }
+    const LoadoutSet* set = cfg.activeSet.empty() ? nullptr : cfg.FindSet(cfg.activeSet);
+    if (!cfg.activeSet.empty() && !set) Chat("Better-IN-Q：配置里没有叫「" + cfg.activeSet + "」的全套");
+    if (set) QueueSet(*set);
+    // 猫饭先原地写一次：之前只在读盘时写，不读盘（任务选「无」、没选任务接不上）就换不上。
+    // 读盘时照旧再写，进任务时以它为准。
+    const bool food = g.food > 0 && WriteFood(cfg, (int)g.food);
+    if (food) Log("猫饭 %d 已原地写入", (int)g.food);
+    if (cfg.EffectiveQuest() == kQuestNone) {   // 任务选「无」：不重开
+        std::string what = set ? "「" + set->name + "」" : (food ? cfg.FoodName((int)g.food) : "");
+        Chat(what.empty() ? "Better-IN-Q：任务选的是「无」，没有要套用的东西"
+                          : "Better-IN-Q：已原地套用" + what);
+        return;
     }
     g.restart = 1;
 }
@@ -668,17 +708,8 @@ void Tick(const Config& cfg)
         }
     }
 
-    // 猫饭：读盘期间把猫饭结构写成预设（CT：pfood+19A4+i*4，i=1..8）
-    if (g.food > 0 && pload && Rd<std::uint32_t>(pload + 0x1D04) != 0) {
-        auto it = cfg.foods.find((int)g.food);
-        const std::uintptr_t pf = P(pFood);
-        if (it != cfg.foods.end() && pf) {
-            const FoodPreset& f = it->second;
-            const std::int32_t v[8] = {f.hp, f.stamina, f.attack, f.defense, f.elemRes,
-                                       f.skill[0], f.skill[1], f.skill[2]};
-            for (int i = 0; i < 8; ++i) Wr<std::int32_t>(pf + 0x19A8 + i * 4, v[i]);
-        }
-    }
+    // 猫饭：读盘期间一直写成预设（进任务时游戏按它给饭的效果）
+    if (g.food > 0 && pload && Rd<std::uint32_t>(pload + 0x1D04) != 0) WriteFood(cfg, (int)g.food);
 
     // 钩子里攒下的提示
     const std::uint32_t m = g.message;
@@ -688,6 +719,7 @@ void Tick(const Config& cfg)
         if (m & kMsgQuest) Chat("Better-IN-Q：接任务失败（没选过任务？）");
         if (m & kMsgCant) Chat("Better-IN-Q：现在不能重开");
         if (m & kMsgWindow) Chat("Better-IN-Q：请先关闭所有窗口");
+        if (m & kMsgNoQuest) Chat("Better-IN-Q：现在不在任务里，不用重置");
     }
 }
 

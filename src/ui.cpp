@@ -47,6 +47,9 @@ int g_focus = 2;
 bool g_focusUsed = false;
 int g_editSet = -1;         // 正在编辑的全套（cfg.sets 下标）
 int g_editFood = 0;         // 正在编辑的猫饭编号
+int g_nameFor = -1;         // 名字框现在装的是哪一份猫饭的名字（换了一份就重新填）
+char g_nameBuf[64] = {};
+bool g_focusName = false;
 int g_questTarget = -1;     // 给谁选任务：-1 = 全局，>=0 = cfg.sets[i]
 char g_search[96] = {};
 int g_scrollToSel = 0;      // 还要把选中的任务滚到视野里几帧（新建的列表头一帧还不知道自己多长，滚不过去）
@@ -84,13 +87,6 @@ Page MainOf(Page p)
     }
 }
 
-// 主页显示的、重开时真正会进的任务：当前套装指定了任务就用套装的
-int EffectiveQuest(const Config& c)
-{
-    if (const LoadoutSet* s = c.FindSet(c.activeSet))
-        if (s->quest) return s->quest;
-    return c.questId;
-}
 
 void Go(Page p)
 {
@@ -423,6 +419,7 @@ int PickPopup(const char* id, const std::vector<std::string>& items, int current
 std::string QuestLabel(int id, const char* zeroText)
 {
     if (id == 0) return zeroText;
+    if (id == kQuestNone) return "无";
     const QuestInfo* q = gamedata::FindQuest(id);
     return q ? q->zh : ("任务 " + std::to_string(id));
 }
@@ -437,13 +434,14 @@ std::string FoodSummary(const FoodPreset& f)
     return s;
 }
 
-std::string SetSummary(const LoadoutSet& s)
+std::string SetSummary(const Config& c, const LoadoutSet& s)
 {
     std::string r;
     auto add = [&](const std::string& t) { if (!r.empty()) r += " · "; r += t; };
     if (!s.equip.empty()) add("装备 " + s.equip);
     if (!s.item.empty()) add("道具 " + s.item);
-    if (s.food) add("猫饭 " + std::to_string(s.food));
+    if (s.food) add(c.FoodName(s.food));
+    if (s.quest == kQuestNone) add("原地套用");
     return r.empty() ? "空套装" : r;
 }
 
@@ -473,19 +471,20 @@ void PageHome(Model& m)
     const float w = ImGui::GetContentRegionAvail().x;
     const int setIdx = ActiveSetIndex(c);
     const LoadoutSet* set = setIdx >= 0 ? &c.sets[setIdx] : nullptr;
-    const int quest = EffectiveQuest(c);
+    const int quest = c.EffectiveQuest();
+    const bool inPlace = quest == kQuestNone;   // 任务选「无」：重开键 = 原地套用
 
     ImGui::Dummy(ImVec2(0, 4 * S));
     Text(fReg, szSmall, kMuted, "当前任务");
     ImGui::Dummy(ImVec2(0, 2 * S));
-    Text(fBold, szTitle, kTitle, QuestLabel(quest, "刚才打的那个任务").c_str(), true);
+    Text(fBold, szTitle, kTitle, inPlace ? "无（原地套用，不重开）" : QuestLabel(quest, "刚才打的那个任务").c_str(), true);
     // 副标题：重开时会套用什么（套装、道具套装、猫饭）
     std::string sub;
     auto add = [&](const std::string& t) { sub += (sub.empty() ? "" : " · ") + t; };
     if (set) add("套装「" + set->name + "」");
     if (set && !set->item.empty()) add("道具「" + set->item + "」");
     const int food = (set && set->food) ? set->food : c.food;
-    if (food) add("猫饭 " + std::to_string(food));
+    if (food) add(c.FoodName(food));
     if (!sub.empty()) Text(fReg, szSmall, kMuted, sub.c_str(), true);
     ImGui::Dummy(ImVec2(0, 24 * S));
 
@@ -493,7 +492,10 @@ void PageHome(Model& m)
         Text(fReg, szSmall, kWarn, "重开功能没装上，详情见 BetterINQ.log", true);
         ImGui::Dummy(ImVec2(0, 6 * S));
     }
-    if (PillButton("##restart", "重开", w, 58 * S, kPrimary, kIcRefresh)) { m.reqRestart = true; m.reqClose = true; }
+    if (PillButton("##restart", inPlace ? "原地套用" : "重开", w, 58 * S, kPrimary, kIcRefresh)) {
+        m.reqRestart = true;
+        m.reqClose = true;
+    }
     FocusDefault();
     if (!c.hkRestart.empty()) {
         const std::string hk = HotkeyText(c.hkRestart);
@@ -573,14 +575,22 @@ void PageQuests(Model& m)
 
     const std::string needle = g_search;
     const bool searching = !needle.empty();
-    // 全局任务可以是 0 =「当前任务」（重开刚打完 / 正在打的那个）。搜索时它和搜的字无关，不列
+    // 全局任务可以是 0 =「当前任务」（重开刚打完 / 正在打的那个）。全局和套装都能选「无」：
+    // 按重开键不重开，原地套用装备、道具、猫饭。搜索时这两行和搜的字无关，不列
     const bool zeroRow = !forSet && !searching;
+    const bool noneRow = !searching;
     if (zeroRow) {
         if (Row("q0", "当前任务", nullptr, target == 0)) pick(0);
         if (target == 0) FocusDefault();
         if (target == 0 && g_scrollToSel > 0) { ImGui::SetScrollHereY(0.3f); --g_scrollToSel; }
     }
-    const bool hasSel = gamedata::FindQuest(target) || (zeroRow && target == 0);   // 没有选中的就把焦点放在第一组上
+    if (noneRow) {
+        if (Row("qn", "无", "原地换装备、道具、猫饭", target == kQuestNone)) pick(kQuestNone);
+        if (target == kQuestNone) FocusDefault();
+        if (target == kQuestNone && g_scrollToSel > 0) { ImGui::SetScrollHereY(0.3f); --g_scrollToSel; }
+    }
+    // 没有选中的就把焦点放在第一组上
+    const bool hasSel = gamedata::FindQuest(target) || (zeroRow && target == 0) || (noneRow && target == kQuestNone);
 
     // 先按组归好（搜索时只留匹配的），再画：每帧只做一遍字符串比较
     std::vector<int> byGroup[16];
@@ -635,7 +645,7 @@ void PageSets(Model& m)
     PageHeader("套装", activeIdx >= 0 ? ("重开时套用「" + c.activeSet + "」").c_str() : nullptr, false);
     for (int i = 0; i < (int)c.sets.size(); ++i) {
         ImGui::PushID(i);
-        if (Row("set", c.sets[i].name.c_str(), SetSummary(c.sets[i]).c_str(), i == activeIdx, 54 * S)) {
+        if (Row("set", c.sets[i].name.c_str(), SetSummary(c, c.sets[i]).c_str(), i == activeIdx, 54 * S)) {
             g_editSet = i;
             Go(kSetEdit);
         }
@@ -696,11 +706,11 @@ void PageSetEdit(Model& m)
     std::vector<int> foodIds = {0};
     int curF = 0;
     for (const auto& f : c.foods) {
-        foods.push_back("猫饭 " + std::to_string(f.first));
+        foods.push_back(c.FoodName(f.first));
         foodIds.push_back(f.first);
         if (f.first == s.food) curF = (int)foods.size() - 1;
     }
-    if (ValueRow("##fd", "猫饭", s.food ? ("猫饭 " + std::to_string(s.food)).c_str() : kNone)) ImGui::OpenPopup("pick_fd");
+    if (ValueRow("##fd", "猫饭", s.food ? c.FoodName(s.food).c_str() : kNone)) ImGui::OpenPopup("pick_fd");
     p = PickPopup("pick_fd", foods, curF);
     if (p >= 0) { s.food = foodIds[p]; m.reqSave = true; }
 
@@ -732,10 +742,10 @@ void PageFood(Model& m)
 {
     Config& c = *m.cfg;
     const bool has = c.foods.count(c.food) > 0;
-    PageHeader("猫饭", has ? ("每次进任务都吃「猫饭 " + std::to_string(c.food) + "」").c_str() : nullptr, false);
+    PageHeader("猫饭", has ? ("每次进任务都吃「" + c.FoodName(c.food) + "」").c_str() : nullptr, false);
     for (auto& kv : c.foods) {
         ImGui::PushID(kv.first);
-        const std::string name = "猫饭 " + std::to_string(kv.first);
+        const std::string name = c.FoodName(kv.first);
         if (Row("food", name.c_str(), FoodSummary(kv.second).c_str(), kv.first == c.food, 54 * S)) {
             g_editFood = kv.first;
             Go(kFoodEdit);
@@ -763,8 +773,37 @@ void PageFoodEdit(Model& m)
     if (it == c.foods.end()) { Go(kFood); return; }
     FoodPreset& f = it->second;
     const bool active = c.food == g_editFood;
-    const std::string title = "猫饭 " + std::to_string(g_editFood);
+    const std::string title = c.FoodName(g_editFood);
     PageHeader(title.c_str(), active ? "每次进任务都吃这个" : nullptr, true);
+
+    // 名字：空着就叫「猫饭 编号」。这一格打字时输入法照常能用（别处面板会把输入法摘掉）
+    if (g_nameFor != g_editFood) {
+        g_nameFor = g_editFood;
+        std::snprintf(g_nameBuf, sizeof(g_nameBuf), "%s", f.name.c_str());
+    }
+    {
+        const float w = ImGui::GetContentRegionAvail().x;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddText(fReg, szBody, ImVec2(p.x + 14 * S, p.y + 10 * S), kMuted, "名字");
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w * 0.3f, p.y + 4 * S));
+        ImGui::SetNextItemWidth(w * 0.7f - 6 * S);
+        ImGui::PushFont(fReg, szBody);
+        if (g_focusName) { ImGui::SetKeyboardFocusHere(); g_focusName = false; }
+        const std::string hint = "猫饭 " + std::to_string(g_editFood);
+        // 配置文件里 ; 和 # 开头的是注释：名字里不收这两个字
+        auto noComment = [](ImGuiInputTextCallbackData* d) { return (d->EventChar == ';' || d->EventChar == '#') ? 1 : 0; };
+        if (ImGui::InputTextWithHint("##name", hint.c_str(), g_nameBuf, sizeof(g_nameBuf),
+                                     ImGuiInputTextFlags_CallbackCharFilter, noComment)) {
+            const std::string n = g_nameBuf;
+            const std::size_t a = n.find_first_not_of(' '), b = n.find_last_not_of(' ');
+            f.name = a == std::string::npos ? std::string() : n.substr(a, b - a + 1);
+            m.reqSave = true;
+        }
+        if (ImGui::IsItemActive()) m.wantIme = true;
+        ImGui::PopFont();
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 46 * S));
+        ImGui::Dummy(ImVec2(0, 0));
+    }
 
     static const char* hp[] = {"+0", "+10", "+20", "+30", "+40", "+50"};
     static const char* st[] = {"+0", "+25", "+50"};
@@ -1043,6 +1082,7 @@ void PageSettings(Model& m)
     ImGui::Dummy(ImVec2(0, 2 * S));
     HotkeyHeader();
     HotkeyRow("##hk1", "重开", c.hkRestart, m);
+    HotkeyRow("##hk2", "只重置回据点", c.hkResetOnly, m);
     HotkeyRow("##hk3", "打开面板", c.hkPanel, m);
     ImGui::Dummy(ImVec2(0, 4 * S));
     const char* hint = !g_cap.spec ? "选中一格按 A 或点一下，再按想用的键"
@@ -1228,8 +1268,8 @@ float DebugFrameHeight() { return g_frameH; }
 
 void DebugStartCapture(Model& m, int row, bool pad)
 {
-    std::string* const specs[] = {&m.cfg->hkRestart, &m.cfg->hkPanel};
-    if (row < 0 || row > 1) return;
+    std::string* const specs[] = {&m.cfg->hkRestart, &m.cfg->hkPanel, &m.cfg->hkResetOnly};
+    if (row < 0 || row > 2) return;
     g_page = kSettings;
     EndCapture();
     g_cap.spec = specs[row];
@@ -1240,6 +1280,7 @@ void DebugStartCapture(Model& m, int row, bool pad)
 std::string DebugCaptureWhy() { return g_capWhy; }
 
 void DebugSetSearch(const char* text) { std::snprintf(g_search, sizeof(g_search), "%s", text); }
+void DebugFocusFoodName() { g_focusName = true; }
 
 void OnOpen(Model& m)
 {
@@ -1256,6 +1297,7 @@ void OnOpen(Model& m)
 void Draw(Model& m, float screenW, float screenH)
 {
     if (!m.cfg) return;
+    m.wantIme = false;   // 名字框这一帧在打字的话会再置上
     const float W = 560 * S;
     const float sideW = 86 * S;
     const float pad = 26 * S;

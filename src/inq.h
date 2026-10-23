@@ -19,7 +19,7 @@ struct State {
     volatile std::int32_t restart = 0;
     volatile std::uint8_t optReset = 0;       // INQ+4  重置后从据点重接（不勾 = 直接重开）
     volatile std::uint8_t optAcceptOnly = 0;  // INQ+5  只接任务不出发
-    // INQ+6 在 CT 里是「这一次只重置」（快捷键给的），这里不做这个功能
+    volatile std::uint8_t resetOnly = 0;      // INQ+6  这一次只重置回据点，不接任务（快捷键给的）
     volatile std::uint8_t optWyvern = 0;      // INQ+7  普通地图用翼龙起始
     volatile std::uint32_t questId = 0;       // INQ+8  0 = 用上一次的任务
     volatile std::int32_t food = 0;           // INQ+C  进任务时套用的猫饭（编号，0 = 不管）
@@ -38,7 +38,9 @@ void ReserveArena();
 bool Ready();
 
 // 重开（快捷键或面板）。会先套用 Active 那套全套配置。重开方式看配置里的 Reset / AcceptOnly。
-void RequestRestart(const Config& cfg);
+// 任务选的是「无」：不重开，只原地套用装备、道具、猫饭。
+// resetOnly：只重置回据点，不接任务、不套全套。
+void RequestRestart(const Config& cfg, bool resetOnly = false);
 
 // 每 100ms 调一次（CT 里 Lua 定时器做的事）
 void Tick(const Config& cfg);

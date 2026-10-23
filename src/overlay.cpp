@@ -76,25 +76,48 @@ ID3D12CommandAllocator* g_alloc[kMaxBuffers] = {};
 UINT64 g_allocFence[kMaxBuffers] = {};
 DXGI_FORMAT g_bbFormat = DXGI_FORMAT_UNKNOWN;
 
-// 面板开着时把输入法从游戏窗口上摘掉，关面板再还回去。搜任务打的是拼音字母，中文输入法
-// 开着会把字母吃进候选框（全屏时候选框还看不见），面板就收不到字。游戏自己也会挂输入法
-//（聊天框），所以开着期间每次按键前都再摘一次，记下最新的那个。
-// Imm* 要在窗口所在的线程里调，所以放在 WndProc 里做（SetOpen 会补发一条 WM_NULL 触发）。
-HIMC g_savedImc = nullptr;
-bool g_imeOff = false;
+// 面板开着时输入法归我们管，关面板再原样还给游戏：
+//  · 平时把输入法从游戏窗口上摘掉。搜任务打的是拼音字母，中文输入法开着会把字母吃进候选框
+//    （全屏时候选框还看不见），面板就收不到字。
+//  · 正在打名字（猫饭改名）时挂上，能打中文。游戏自己把输入法关着的话挂系统默认的那个。
+// 游戏自己也会挂输入法（聊天框），所以该摘着的时候每次按键前都再摘一次，记下游戏最新挂的那个。
+// Imm* 要在窗口所在的线程里调，所以放在 WndProc 里做（SetOpen / SetImeWanted 会补发 WM_NULL 触发）。
+std::atomic<bool> g_imeWanted{false};
+HIMC g_gameImc = nullptr;   // 游戏窗口原来挂的输入法（空 = 游戏把输入法关着）
+bool g_imeOwned = false;    // 面板开着、输入法归我们管
+int g_imeOn = -1;           // 我们现在设成了：0 摘掉 1 挂上
 
 void SyncIme(HWND h, UINT msg, bool open)
 {
-    if (open) {
-        if (!g_imeOff || msg == WM_KEYDOWN || msg == WM_INPUTLANGCHANGE || msg == WM_IME_STARTCOMPOSITION) {
-            if (HIMC prev = ::ImmAssociateContext(h, nullptr)) g_savedImc = prev;
-            g_imeOff = true;
-        }
-    } else if (g_imeOff) {
-        if (g_savedImc) ::ImmAssociateContext(h, g_savedImc);
-        g_savedImc = nullptr;
-        g_imeOff = false;
+    if (!open) {
+        if (g_imeOwned) ::ImmAssociateContext(h, g_gameImc);   // 原样还回去（原来是空的就还是关着）
+        g_gameImc = nullptr;
+        g_imeOwned = false;
+        g_imeOn = -1;
+        return;
     }
+    if (!g_imeOwned) {
+        g_gameImc = ::ImmAssociateContext(h, nullptr);
+        g_imeOwned = true;
+        g_imeOn = 0;
+    }
+    const int want = g_imeWanted.load() ? 1 : 0;
+    if (want != g_imeOn) {
+        if (want) {
+            if (g_gameImc) ::ImmAssociateContext(h, g_gameImc);
+            else ::ImmAssociateContextEx(h, nullptr, IACE_DEFAULT);
+        } else {
+            ::ImmAssociateContext(h, nullptr);
+        }
+        g_imeOn = want;
+    } else if (!want && (msg == WM_KEYDOWN || msg == WM_INPUTLANGCHANGE || msg == WM_IME_STARTCOMPOSITION)) {
+        if (HIMC prev = ::ImmAssociateContext(h, nullptr)) g_gameImc = prev;   // 游戏刚又挂上的
+    }
+}
+
+bool IsImeMessage(UINT msg)
+{
+    return (msg >= WM_IME_STARTCOMPOSITION && msg <= WM_IME_KEYLAST) || (msg >= WM_IME_SETCONTEXT && msg <= WM_IME_KEYUP);
 }
 
 // 面板开着时把键鼠消息吃掉，游戏收不到（手柄另由 padfilter 挡，DirectInput 和按键查询由 kbmfilter 挡）
@@ -112,6 +135,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
         case WM_INPUT:
             return ::DefWindowProcW(h, msg, w, l);   // 原始输入：交给系统收尾，不给游戏
         }
+        // 输入法的消息交给系统默认处理：组字、候选框照常显示，打完的字变成 WM_CHAR 进面板。
+        // 不给游戏（游戏会当成聊天框在打字）
+        if (IsImeMessage(msg)) return ::DefWindowProcW(h, msg, w, l);
     }
     return ::CallWindowProcW(g_wndProc, h, msg, w, l);
 }
@@ -541,6 +567,10 @@ void SetOpen(bool open)
     if (g_wndProc && g_hwnd) ::PostMessageW(g_hwnd, WM_NULL, 0, 0);   // 输入法摘下 / 还回去
 }
 bool IsOpen() { return g_open.load() && !g_failed.load(); }
+void SetImeWanted(bool want)
+{
+    if (g_imeWanted.exchange(want) != want && g_wndProc && g_hwnd) ::PostMessageW(g_hwnd, WM_NULL, 0, 0);
+}
 bool Failed() { return g_failed.load(); }
 void SetDebugAfterDraw(void (*fn)(void*)) { g_debugAfterDraw = fn; }
 void SetDebugAfterDraw12(void (*fn)(void*, void*)) { g_debugAfterDraw12 = fn; }

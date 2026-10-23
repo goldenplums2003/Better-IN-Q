@@ -343,6 +343,86 @@ int main()
         }
     }
 
+    // 任务选「无」：全局列表「当前任务」下面一行；选了之后主页的大按钮就是原地套用
+    {
+        const int questBefore = cfg.questId;
+        const std::string setBefore = cfg.activeSet;
+        cfg.activeSet.clear();                    // 套装里的任务会盖过全局的，先不用套装
+        cfg.questId = 0;                          // 焦点会落在「当前任务」上
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(1, 0);
+        for (int i = 0; i < 4; ++i) Frame();
+        Press(ImGuiKey_GamepadDpadDown);          // 当前任务 → 无
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(cfg.questId == kQuestNone && ui::DebugPage() == 0 && m.reqSave,
+              "换任务里选「无」：全局任务 = %d，回到主页（%s）", cfg.questId, PageName(ui::DebugPage()));
+        CHECK(cfg.EffectiveQuest() == kQuestNone, "实际任务 =「无」");
+        m.reqSave = false;
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(m.reqRestart && m.reqClose, "主页按 A：照样发「重开」请求（选了「无」时主循环那边只原地套用）");
+        m.reqRestart = m.reqClose = false;
+
+        // 套装里也能选「无」，它会盖过全局的
+        cfg.questId = 66845;
+        cfg.activeSet = setBefore;
+        LoadoutSet* mila = const_cast<LoadoutSet*>(cfg.FindSet(setBefore));
+        if (mila) {
+            const int setQuest = mila->quest;
+            mila->quest = kQuestNone;
+            CHECK(cfg.EffectiveQuest() == kQuestNone, "套装里的任务是「无」：实际任务也是「无」");
+            mila->quest = setQuest;
+        }
+        cfg.questId = questBefore;
+        cfg.activeSet = setBefore;
+    }
+
+    // 猫饭改名：名字框打字时要输入法，打完存进配置；清空就回到「猫饭 编号」
+    {
+        const int fid = cfg.foods.begin()->first;
+        const std::string nameBefore = cfg.foods[fid].name;
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        CHECK(!m.wantIme, "平时面板里不要输入法");
+        ui::DebugGo(5, fid);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugFocusFoodName();
+        Frame();
+        Frame();
+        CHECK(m.wantIme, "名字框在打字：要输入法（能打中文）");
+        ImGui::GetIO().AddInputCharactersUTF8("黑龙;饭");
+        Frame();
+        Frame();
+        CHECK(cfg.foods[fid].name == "黑龙饭" && m.reqSave, "打「黑龙;饭」：存成「%s」（分号是配置文件的注释符，不收）",
+              cfg.foods[fid].name.c_str());
+        CHECK(cfg.FoodName(fid) == "黑龙饭", "列表、主页、套装里显示的名字跟着变（%s）", cfg.FoodName(fid).c_str());
+        Press(ImGuiKey_Enter);
+        CHECK(!m.wantIme && ui::DebugPage() == 5, "回车：打完了，不再要输入法，还在猫饭编辑页（%s）", PageName(ui::DebugPage()));
+        ui::DebugFocusFoodName();
+        Frame();
+        Frame();
+        for (int i = 0; i < 4; ++i) Press(ImGuiKey_Backspace);
+        CHECK(cfg.foods[fid].name.empty() && cfg.FoodName(fid) == "猫饭 " + std::to_string(fid),
+              "删光：回到默认名「%s」", cfg.FoodName(fid).c_str());
+        Press(ImGuiKey_Enter);
+        cfg.foods[fid].name = nameBefore;
+        m.reqSave = false;
+    }
+
+    // 「只重置回据点」快捷键：设置页第三行，能录
+    {
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        const std::string before = cfg.hkResetOnly;
+        ui::DebugStartCapture(m, 2, true);
+        Hold(0);
+        Hold(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_BACK);
+        Hold(0);
+        CHECK(cfg.hkResetOnly == "LB+RB+View" && !m.capturing, "录「只重置回据点」：%s", cfg.hkResetOnly.c_str());
+        cfg.hkResetOnly = before;
+        m.reqSave = false;
+    }
+
     // 主页的「重开」按 A
     ui::OnOpen(m);
     for (int i = 0; i < 4; ++i) Frame();

@@ -62,7 +62,7 @@ std::string Render(const Config& c)
     std::string o = "\xEF\xBB\xBF";
     o += "; Better-IN-Q 配置。面板里改的设置会自动存回这里；手改的话下次进游戏生效。\r\n\r\n";
     o += "[General]\r\n";
-    o += kv("QuestID", num(c.questId), "重开时接的任务 ID，0 = 用上一次的任务");
+    o += kv("QuestID", num(c.questId), "重开时接的任务 ID，0 = 用上一次的任务，-1 = 无（不重开，原地套用）");
     o += kv("Reset", num(c.reset), "1 = 重置后回据点再接（慢，完全走正规流程）");
     o += kv("AcceptOnly", num(c.acceptOnly), "1 = 只接任务，不出发");
     o += kv("WyvernStart", num(c.wyvern), "1 = 普通地图用翼龙起始");
@@ -76,6 +76,7 @@ std::string Render(const Config& c)
     o += "; 键盘：Ctrl Shift Alt F1~F12 A~Z 0~9 Insert Delete Home End PageUp PageDown\r\n";
     o += "; 多个组合用 | 隔开\r\n";
     o += kv("Restart", c.hkRestart, "重开");
+    o += kv("ResetOnly", c.hkResetOnly, "只重置回据点（不接任务）");
     o += kv("Panel", c.hkPanel, "打开/关闭面板");
     o += "\r\n; 全套：Equip/Item 写游戏里的套装名字，或游戏列表里看到的编号\r\n";
     if (c.sets.empty())
@@ -86,7 +87,7 @@ std::string Render(const Config& c)
         o += kv("Item", s.item, "");
         o += kv("LinkRadial", num(s.linkRadial), "套道具时联动快捷栏");
         o += kv("Food", num(s.food), "");
-        o += kv("Quest", num(s.quest), "");
+        o += kv("Quest", num(s.quest), "0 = 用上面的 QuestID，-1 = 无（原地套用）");
         o += "\r\n";
     }
     o += "; 猫饭：HP 0~5（+0~+50） Stamina 0~2（+0/+25/+50） Attack/Defense/ElemRes 0~3（无/小/中/大）"
@@ -96,6 +97,7 @@ std::string Render(const Config& c)
     for (const auto& kvp : c.foods) {
         const FoodPreset& f = kvp.second;
         o += "[Food." + num(kvp.first) + "]\r\n";
+        if (!f.name.empty()) o += kv("Name", f.name, "");
         o += kv("HP", num(f.hp), "");
         o += kv("Stamina", num(f.stamina), "");
         o += kv("Attack", num(f.attack), "");
@@ -179,6 +181,7 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
             else if (k == "Debug") cfg.debug = n;
         } else if (sec == "Hotkeys") {
             if (k == "Restart") cfg.hkRestart = v;
+            else if (k == "ResetOnly") cfg.hkResetOnly = v;
             else if (k == "Panel") cfg.hkPanel = v;
         } else if (curSet) {
             if (k == "Equip") curSet->equip = v;
@@ -187,7 +190,8 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
             else if (k == "Food") curSet->food = n;
             else if (k == "Quest") curSet->quest = n;
         } else if (curFood) {
-            if (k == "HP") curFood->hp = n;
+            if (k == "Name") curFood->name = v;
+            else if (k == "HP") curFood->hp = n;
             else if (k == "Stamina") curFood->stamina = n;
             else if (k == "Attack") curFood->attack = n;
             else if (k == "Defense") curFood->defense = n;
