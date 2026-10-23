@@ -441,7 +441,7 @@ std::string SetSummary(const Config& c, const LoadoutSet& s)
     if (!s.equip.empty()) add("装备 " + s.equip);
     if (!s.item.empty()) add("道具 " + s.item);
     if (s.food) add(c.FoodName(s.food));
-    if (s.quest == kQuestNone) add("原地套用");
+    if (s.quest == kQuestNone) add("原地换装");
     return r.empty() ? "空套装" : r;
 }
 
@@ -477,7 +477,7 @@ void PageHome(Model& m)
     ImGui::Dummy(ImVec2(0, 4 * S));
     Text(fReg, szSmall, kMuted, "当前任务");
     ImGui::Dummy(ImVec2(0, 2 * S));
-    Text(fBold, szTitle, kTitle, inPlace ? "无（原地套用，不重开）" : QuestLabel(quest, "刚才打的那个任务").c_str(), true);
+    Text(fBold, szTitle, kTitle, inPlace ? "无（原地换装）" : QuestLabel(quest, "刚才打的那个任务").c_str(), true);
     // 副标题：重开时会套用什么（套装、道具套装、猫饭）
     std::string sub;
     auto add = [&](const std::string& t) { sub += (sub.empty() ? "" : " · ") + t; };
@@ -492,7 +492,7 @@ void PageHome(Model& m)
         Text(fReg, szSmall, kWarn, "重开功能没装上，详情见 BetterINQ.log", true);
         ImGui::Dummy(ImVec2(0, 6 * S));
     }
-    if (PillButton("##restart", inPlace ? "原地套用" : "重开", w, 58 * S, kPrimary, kIcRefresh)) {
+    if (PillButton("##restart", inPlace ? "原地换装" : "重开", w, 58 * S, kPrimary, kIcRefresh)) {
         m.reqRestart = true;
         m.reqClose = true;
     }
@@ -585,7 +585,7 @@ void PageQuests(Model& m)
         if (target == 0 && g_scrollToSel > 0) { ImGui::SetScrollHereY(0.3f); --g_scrollToSel; }
     }
     if (noneRow) {
-        if (Row("qn", "无", "原地换装备、道具、猫饭", target == kQuestNone)) pick(kQuestNone);
+        if (Row("qn", "无", "原地更换套装", target == kQuestNone)) pick(kQuestNone);
         if (target == kQuestNone) FocusDefault();
         if (target == kQuestNone && g_scrollToSel > 0) { ImGui::SetScrollHereY(0.3f); --g_scrollToSel; }
     }

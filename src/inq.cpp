@@ -614,7 +614,7 @@ void RequestRestart(const Config& cfg, bool resetOnly)
     if (food) Log("猫饭 %d 已原地写入", (int)g.food);
     if (cfg.EffectiveQuest() == kQuestNone) {   // 任务选「无」：不重开
         std::string what = set ? "「" + set->name + "」" : (food ? cfg.FoodName((int)g.food) : "");
-        Chat(what.empty() ? "Better-IN-Q：任务选的是「无」，没有要套用的东西"
+        Chat(what.empty() ? "Better-IN-Q：未选择任务、套装以及猫饭"
                           : "Better-IN-Q：已原地套用" + what);
         return;
     }
@@ -719,7 +719,7 @@ void Tick(const Config& cfg)
         if (m & kMsgQuest) Chat("Better-IN-Q：接任务失败（没选过任务？）");
         if (m & kMsgCant) Chat("Better-IN-Q：现在不能重开");
         if (m & kMsgWindow) Chat("Better-IN-Q：请先关闭所有窗口");
-        if (m & kMsgNoQuest) Chat("Better-IN-Q：现在不在任务里，不用重置");
+        if (m & kMsgNoQuest) Chat("Better-IN-Q：目前不在任务中，无法重置回据点");
     }
 }
 
