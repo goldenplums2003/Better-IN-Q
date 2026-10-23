@@ -47,9 +47,10 @@ int g_focus = 2;
 bool g_focusUsed = false;
 int g_editSet = -1;         // 正在编辑的全套（cfg.sets 下标）
 int g_editFood = 0;         // 正在编辑的猫饭编号
-int g_nameFor = -1;         // 名字框现在装的是哪一份猫饭的名字（换了一份就重新填）
+int g_nameFor = -1;         // 名字框现在装的是哪一份猫饭 / 哪一套的名字（换了就重新填；进编辑页时清掉）
 char g_nameBuf[64] = {};
 bool g_focusName = false;
+std::string g_nameWarn;     // 套装名字不合规（空的、重名）的提示
 int g_questTarget = -1;     // 给谁选任务：-1 = 全局，>=0 = cfg.sets[i]
 char g_search[96] = {};
 int g_scrollToSel = 0;      // 还要把选中的任务滚到视野里几帧（新建的列表头一帧还不知道自己多长，滚不过去）
@@ -93,6 +94,40 @@ void Go(Page p)
     g_page = p;
     g_focus = 2;
     if (p == kQuests) { g_search[0] = 0; g_scrollToSel = 3; g_questInit = true; }
+    if (p == kSetEdit || p == kFoodEdit) g_nameFor = -1;   // 名字框重新填
+    g_nameWarn.clear();
+}
+
+// 编辑页最上面的「名字」一栏。打字时要输入法（能打中文）；; 和 # 不收（配置文件的注释符）
+struct NameEdit {
+    bool changed = false;     // 这一帧框里的字变了
+    bool active = false;      // 还在打字
+    bool committed = false;   // 刚打完（回车、点了别处），而且改过
+    std::string text;         // 框里的字，去掉首尾空格
+};
+NameEdit NameField(Model& m, const char* hint)
+{
+    NameEdit r;
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddText(fReg, szBody, ImVec2(p.x + 14 * S, p.y + 10 * S), kMuted, "名字");
+    ImGui::SetCursorScreenPos(ImVec2(p.x + w * 0.3f, p.y + 4 * S));
+    ImGui::SetNextItemWidth(w * 0.7f - 6 * S);
+    ImGui::PushFont(fReg, szBody);
+    if (g_focusName) { ImGui::SetKeyboardFocusHere(); g_focusName = false; }
+    auto noComment = [](ImGuiInputTextCallbackData* d) { return (d->EventChar == ';' || d->EventChar == '#') ? 1 : 0; };
+    r.changed = ImGui::InputTextWithHint("##name", hint, g_nameBuf, sizeof(g_nameBuf), ImGuiInputTextFlags_CallbackCharFilter,
+                                         noComment);
+    r.active = ImGui::IsItemActive();
+    r.committed = ImGui::IsItemDeactivatedAfterEdit();
+    if (r.active) m.wantIme = true;
+    ImGui::PopFont();
+    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 46 * S));
+    ImGui::Dummy(ImVec2(0, 0));
+    const std::string n = g_nameBuf;
+    const std::size_t a = n.find_first_not_of(' '), b = n.find_last_not_of(' ');
+    r.text = a == std::string::npos ? std::string() : n.substr(a, b - a + 1);
+    return r;
 }
 
 bool NavVisible() { return GImGui->NavCursorVisible; }
@@ -676,6 +711,33 @@ void PageSetEdit(Model& m)
     const bool active = s.name == c.activeSet;
     PageHeader(s.name.c_str(), active ? "重开时会套用这套" : nullptr, true);
 
+    // 名字：套装是按名字认的（重开时套用哪一套、配置文件里的分节），不能空、不能和别的套装重名。
+    // 打完（回车、点别处）才改名；不合规的不改，框下面说明原因，框里退回原来的名字
+    if (g_nameFor != g_editSet) {
+        g_nameFor = g_editSet;
+        std::snprintf(g_nameBuf, sizeof(g_nameBuf), "%s", s.name.c_str());
+    }
+    {
+        const NameEdit e = NameField(m, "套装名字");
+        auto problem = [&](const std::string& n) -> std::string {
+            if (n.empty()) return "名字不能为空";
+            if (n != s.name && c.FindSet(n)) return "已经有叫「" + n + "」的套装了";
+            return std::string();
+        };
+        if (e.changed) g_nameWarn = problem(e.text);
+        if (e.committed && problem(e.text).empty() && e.text != s.name) {
+            if (c.activeSet == s.name) c.activeSet = e.text;   // 重开时套用的就是这套：跟着改
+            s.name = e.text;
+            m.reqSave = true;
+        }
+        // 不打字了：框里是实际的名字（不合规没改成的退回去）。提示留着说明为什么没改，再打字或离开这页才收
+        if (!e.active && s.name != g_nameBuf) std::snprintf(g_nameBuf, sizeof(g_nameBuf), "%s", s.name.c_str());
+        if (!g_nameWarn.empty()) {
+            Text(fReg, szSmall, kWarn, g_nameWarn.c_str());
+            ImGui::Dummy(ImVec2(0, 4 * S));
+        }
+    }
+
     // 装备
     std::vector<std::string> equips = {kNone};
     int curE = 0;
@@ -782,27 +844,12 @@ void PageFoodEdit(Model& m)
         std::snprintf(g_nameBuf, sizeof(g_nameBuf), "%s", f.name.c_str());
     }
     {
-        const float w = ImGui::GetContentRegionAvail().x;
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddText(fReg, szBody, ImVec2(p.x + 14 * S, p.y + 10 * S), kMuted, "名字");
-        ImGui::SetCursorScreenPos(ImVec2(p.x + w * 0.3f, p.y + 4 * S));
-        ImGui::SetNextItemWidth(w * 0.7f - 6 * S);
-        ImGui::PushFont(fReg, szBody);
-        if (g_focusName) { ImGui::SetKeyboardFocusHere(); g_focusName = false; }
-        const std::string hint = "猫饭 " + std::to_string(g_editFood);
-        // 配置文件里 ; 和 # 开头的是注释：名字里不收这两个字
-        auto noComment = [](ImGuiInputTextCallbackData* d) { return (d->EventChar == ';' || d->EventChar == '#') ? 1 : 0; };
-        if (ImGui::InputTextWithHint("##name", hint.c_str(), g_nameBuf, sizeof(g_nameBuf),
-                                     ImGuiInputTextFlags_CallbackCharFilter, noComment)) {
-            const std::string n = g_nameBuf;
-            const std::size_t a = n.find_first_not_of(' '), b = n.find_last_not_of(' ');
-            f.name = a == std::string::npos ? std::string() : n.substr(a, b - a + 1);
+        // 猫饭按编号认，名字随打随改；空着就叫「猫饭 编号」
+        const NameEdit e = NameField(m, ("猫饭 " + std::to_string(g_editFood)).c_str());
+        if (e.changed) {
+            f.name = e.text;
             m.reqSave = true;
         }
-        if (ImGui::IsItemActive()) m.wantIme = true;
-        ImGui::PopFont();
-        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 46 * S));
-        ImGui::Dummy(ImVec2(0, 0));
     }
 
     static const char* hp[] = {"+0", "+10", "+20", "+30", "+40", "+50"};
@@ -1280,7 +1327,8 @@ void DebugStartCapture(Model& m, int row, bool pad)
 std::string DebugCaptureWhy() { return g_capWhy; }
 
 void DebugSetSearch(const char* text) { std::snprintf(g_search, sizeof(g_search), "%s", text); }
-void DebugFocusFoodName() { g_focusName = true; }
+void DebugFocusName() { g_focusName = true; }
+std::string DebugNameWarn() { return g_nameWarn; }
 
 void OnOpen(Model& m)
 {

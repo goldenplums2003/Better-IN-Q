@@ -55,6 +55,13 @@ static void Press(ImGuiKey k)
     Frame();
 }
 
+static int ActiveIndex(const Config& c)
+{
+    for (int i = 0; i < (int)c.sets.size(); ++i)
+        if (c.sets[i].name == c.activeSet) return i;
+    return -1;
+}
+
 static const char* PageName(int p)
 {
     static const char* n[] = {"主页", "换任务", "套装", "套装编辑", "猫饭", "猫饭编辑", "设置"};
@@ -386,7 +393,7 @@ int main()
         CHECK(!m.wantIme, "平时面板里不要输入法");
         ui::DebugGo(5, fid);
         for (int i = 0; i < 4; ++i) Frame();
-        ui::DebugFocusFoodName();
+        ui::DebugFocusName();
         Frame();
         Frame();
         CHECK(m.wantIme, "名字框在打字：要输入法（能打中文）");
@@ -398,7 +405,7 @@ int main()
         CHECK(cfg.FoodName(fid) == "黑龙饭", "列表、主页、套装里显示的名字跟着变（%s）", cfg.FoodName(fid).c_str());
         Press(ImGuiKey_Enter);
         CHECK(!m.wantIme && ui::DebugPage() == 5, "回车：打完了，不再要输入法，还在猫饭编辑页（%s）", PageName(ui::DebugPage()));
-        ui::DebugFocusFoodName();
+        ui::DebugFocusName();
         Frame();
         Frame();
         for (int i = 0; i < 4; ++i) Press(ImGuiKey_Backspace);
@@ -407,6 +414,69 @@ int main()
         Press(ImGuiKey_Enter);
         cfg.foods[fid].name = nameBefore;
         m.reqSave = false;
+    }
+
+    // 套装改名：打完才生效；正在用的那套改了名，「重开时套用」跟着改；空的、重名的不改
+    {
+        const int idx = ActiveIndex(cfg);
+        CHECK(idx >= 0, "测试配置里有正在用的套装");
+        if (idx >= 0) {
+            const std::string oldName = cfg.sets[idx].name;
+            LoadoutSet other;
+            other.name = "别的套装";
+            cfg.sets.push_back(other);
+            ui::OnOpen(m);
+            for (int i = 0; i < 4; ++i) Frame();
+            ui::DebugGo(3, idx);
+            for (int i = 0; i < 4; ++i) Frame();
+            ui::DebugFocusName();
+            Frame();
+            Frame();
+            CHECK(m.wantIme, "套装名字框在打字：要输入法");
+            const std::string renamed = "新套装名";
+            for (int i = 0; i < 12; ++i) Press(ImGuiKey_Backspace);   // 获得焦点时原名是全选的，删一下就空了，多删几下也没事
+            ImGui::GetIO().AddInputCharactersUTF8(renamed.c_str());
+            Frame();
+            Frame();
+            CHECK(cfg.sets[idx].name == oldName, "打字中：还没改名（%s）", cfg.sets[idx].name.c_str());
+            Press(ImGuiKey_Enter);
+            CHECK(cfg.sets[idx].name == renamed && cfg.activeSet == renamed && m.reqSave && !m.wantIme,
+                  "回车：改成「%s」，重开时套用的也跟着改（%s）", cfg.sets[idx].name.c_str(), cfg.activeSet.c_str());
+            m.reqSave = false;
+
+            // 删光再回车：不能为空，不改，框里退回原名
+            ui::DebugFocusName();
+            Frame();
+            Frame();
+            for (int i = 0; i < 12; ++i) Press(ImGuiKey_Backspace);
+            CHECK(ui::DebugNameWarn() == "名字不能为空", "删光：提示「%s」", ui::DebugNameWarn().c_str());
+            Press(ImGuiKey_Enter);
+            CHECK(cfg.sets[idx].name == renamed && !m.reqSave, "空着回车：不改，还叫「%s」", cfg.sets[idx].name.c_str());
+
+            // 和别的套装重名：不改
+            ui::DebugFocusName();
+            Frame();
+            Frame();
+            for (int i = 0; i < 12; ++i) Press(ImGuiKey_Backspace);
+            ImGui::GetIO().AddInputCharactersUTF8("别的套装");
+            Frame();
+            Frame();
+            CHECK(ui::DebugNameWarn().find("别的套装") != std::string::npos, "打成别的套装的名字：提示「%s」",
+                  ui::DebugNameWarn().c_str());
+            Press(ImGuiKey_Enter);
+            CHECK(cfg.sets[idx].name == renamed && cfg.sets.back().name == "别的套装" && cfg.activeSet == renamed,
+                  "重名回车：两套都没动（%s / %s）", cfg.sets[idx].name.c_str(), cfg.sets.back().name.c_str());
+            for (int i = 0; i < 3; ++i) Frame();
+            CHECK(!ui::DebugNameWarn().empty(), "没改成：提示留着，说明为什么");
+            ui::DebugGo(2, 0);
+            Frame();
+            CHECK(ui::DebugNameWarn().empty(), "离开这页：提示收起");
+
+            cfg.sets.pop_back();
+            cfg.sets[idx].name = oldName;
+            cfg.activeSet = oldName;
+            m.reqSave = false;
+        }
     }
 
     // 「只重置回据点」快捷键：设置页第三行，能录

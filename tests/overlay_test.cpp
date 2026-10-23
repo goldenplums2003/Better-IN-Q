@@ -200,7 +200,7 @@ int wmain(int argc, wchar_t** argv)
         const std::string nameBefore = g_cfg.foods[fid].name;
         ui::DebugGo(5, fid);
         for (int i = 0; i < 4; ++i) frame(0.25f, 0.35f, 0.25f);
-        ui::DebugFocusFoodName();
+        ui::DebugFocusName();
         for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
         pump();
         HIMC on = ImmGetContext(hw);

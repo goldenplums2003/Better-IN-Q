@@ -58,7 +58,8 @@ void DebugStartCapture(Model& m, int row, bool pad);
 std::string DebugCaptureWhy();
 // 预览 / 宣传图用：往「换任务」的搜索框里填字
 void DebugSetSearch(const char* text);
-// 测试用：下一帧把键盘焦点放到猫饭编辑页的名字框上（开始打字）
-void DebugFocusFoodName();
+// 测试用：下一帧把键盘焦点放到编辑页（猫饭 / 套装）的名字框上（开始打字）；套装名字不合规的提示
+void DebugFocusName();
+std::string DebugNameWarn();
 
 } // namespace ui
