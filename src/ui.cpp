@@ -827,9 +827,7 @@ void PageFood(Model& m)
         Go(kFoodEdit);
     }
     ImGui::Dummy(ImVec2(0, 10 * S));
-    if (ToggleRow("##fe", "正常接任务时沿用此猫饭",
-                  "关闭时：只有使用INQ重置或换装之后才会加载INQ中的猫饭；开启时：进行所有任务都会沿用INQ配置中选中的猫饭",
-                  &c.foodEveryQuest))
+    if (ToggleRow("##fe", "正常接任务时沿用此猫饭", nullptr, &c.foodEveryQuest))
         m.reqSave = true;
 }
 
