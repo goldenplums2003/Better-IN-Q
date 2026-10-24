@@ -1,5 +1,6 @@
 // 配置文件和快捷键写法的解析测试
 #include "../src/config.h"
+#include "../src/foodgate.h"
 #include "../src/input.h"
 
 #include <windows.h>
@@ -147,6 +148,34 @@ int main()
     CHECK(h.alts.size() == 1 && h.alts[0].rt && h.bad == "Foo ", "认不出的组合整组丢掉并记下：'%s'", h.bad.c_str());
     h = ParseHotkey("");
     CHECK(h.alts.empty(), "空字符串 = 不设快捷键");
+
+    // 猫饭什么时候写：只在插件重开的那一轮
+    {
+        FoodGate g;
+        CHECK(!g.Step(true, 0, false), "没用过插件：自己接任务读盘，不写猫饭");
+        CHECK(g.Step(true, 0, true), "勾了「正常进任务也吃」：自己接任务也写");
+        g.Arm();
+        CHECK(g.Step(true, 2, false), "插件重开：重置那次读盘照写");
+        CHECK(!g.Step(false, 3, false) && g.armed, "回据点、接任务途中：还上着膛");
+        CHECK(g.Step(true, 0, false), "出发进任务那次读盘：写");
+        CHECK(!g.Step(false, 0, false) && !g.armed, "读盘完：退膛");
+        CHECK(!g.Step(true, 0, false), "之后自己接任务：不写");
+        g.Arm();
+        g.Disarm();
+        CHECK(!g.Step(true, 0, false), "重开失败退膛：之后的读盘不写");
+        g.Arm();
+        CHECK(!g.Step(false, 0, false) && g.armed, "只接任务不出发：流程走完但还没读盘，等玩家自己出发");
+        CHECK(g.Step(true, 0, false) && (g.Step(false, 0, false), !g.armed), "玩家出发那次写，之后退膛");
+        Config c;
+        c.foodEveryQuest = true;
+        const std::wstring p = L"out\\config_test_fe.ini";
+        SaveConfig(p, c);
+        Config r;
+        std::string err;
+        LoadConfig(p, r, err);
+        CHECK(r.foodEveryQuest, "「正常进任务也吃」存了能读回来");
+        ::DeleteFileW(p.c_str());
+    }
 
     // 0.6.4：任务「无」、猫饭名字、只重置回据点的快捷键，存了能原样读回来
     {

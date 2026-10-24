@@ -826,6 +826,9 @@ void PageFood(Model& m)
         m.reqSave = true;
         Go(kFoodEdit);
     }
+    ImGui::Dummy(ImVec2(0, 10 * S));
+    if (ToggleRow("##fe", "正常进任务也吃这份", "关闭时只有插件重开才换猫饭，自己接任务吃自己点的饭", &c.foodEveryQuest))
+        m.reqSave = true;
 }
 
 void PageFoodEdit(Model& m)

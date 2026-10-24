@@ -8,6 +8,7 @@
 // ============================================================================
 #include "inq.h"
 
+#include "foodgate.h"
 #include "game.h"
 #include "hook.h"
 #include "log.h"
@@ -531,6 +532,7 @@ int g_pendingSetItem = 0;
 bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 int g_savedRadial = -1;   // CT 的 wassetting：套道具前「联动快捷栏」原来的值
+FoodGate g_foodGate;      // 读盘时写不写猫饭：只在插件重开的那一轮写（见 foodgate.h）
 
 // 诊断：重开后 30 秒里，任务状态和钩子事件有变化就写日志
 constexpr ULONGLONG kTraceMs = 30000;
@@ -614,10 +616,12 @@ void RequestRestart(const Config& cfg, bool resetOnly)
     if (food) Log("猫饭 %d 已原地写入", (int)g.food);
     if (cfg.EffectiveQuest() == kQuestNone) {   // 任务选「无」：不重开
         std::string what = set ? "「" + set->name + "」" : (food ? cfg.FoodName((int)g.food) : "");
+        g_foodGate.Arm();   // 原地换装后接着进任务：那次读盘也按插件的猫饭来
         Chat(what.empty() ? "Better-IN-Q：未选择任务、套装以及猫饭"
                           : "Better-IN-Q：已原地套用" + what);
         return;
     }
+    g_foodGate.Arm();
     g.restart = 1;
 }
 
@@ -709,7 +713,8 @@ void Tick(const Config& cfg)
     }
 
     // 猫饭：读盘期间一直写成预设（进任务时游戏按它给饭的效果）
-    if (g.food > 0 && pload && Rd<std::uint32_t>(pload + 0x1D04) != 0) WriteFood(cfg, (int)g.food);
+    const bool loading = pload && Rd<std::uint32_t>(pload + 0x1D04) != 0;
+    if (g_foodGate.Step(loading, g.restart, cfg.foodEveryQuest) && g.food > 0) WriteFood(cfg, (int)g.food);
 
     // 钩子里攒下的提示
     const std::uint32_t m = g.message;
@@ -717,6 +722,7 @@ void Tick(const Config& cfg)
         g.message = 0;
         if (m & kMsgEquip) Chat("Better-IN-Q：这个装备套装是空的或无效");
         if (m & kMsgQuest) Chat("Better-IN-Q：接任务失败（没选过任务？）");
+        if (m & (kMsgQuest | kMsgCant | kMsgNoQuest)) g_foodGate.Disarm();   // 重开没成：之后的读盘不归插件管
         if (m & kMsgCant) Chat("Better-IN-Q：现在不能重开");
         if (m & kMsgWindow) Chat("Better-IN-Q：请先关闭所有窗口");
         if (m & kMsgNoQuest) Chat("Better-IN-Q：目前不在任务中，无法重置回据点");

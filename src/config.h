@@ -34,6 +34,7 @@ struct Config {
     std::string activeSet;      // 重开时套用的全套，空 = 不套用
     int food = 0;               // 每次进任务都吃的猫饭，0 = 不管
     bool quickBlackout = true;  // 缩短转场黑屏
+    bool foodEveryQuest = false;  // 自己正常接任务出发时也换成插件的猫饭（关着 = 只有插件重开才换）
     int panelOpacity = 80;      // 面板不透明度 %，越小越透
     int debug = 0;
 
