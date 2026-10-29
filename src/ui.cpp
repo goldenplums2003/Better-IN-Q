@@ -55,6 +55,8 @@ std::string g_nameWarn;     // 套装名字不合规（空的、重名）的提�
 // 排序：鼠标按住一行上下拖；手柄选中一行按 LB / RB 上下挪；键盘 Ctrl + 上下
 //（手柄 X 不能用：ImGui 拿它切菜单层，一按焦点就跑了）
 bool g_dragMoved = false;   // 这一下鼠标按住拖过位置：松开时别当成点开
+ImVec2 g_panelMin, g_panelMax;   // 面板外框（确认弹窗摆在它正中）
+bool g_openDelete = false;       // 测试用：下一帧直接弹出删除确认
 std::vector<ImRect> g_rowRects;   // 测试用：这一帧列表各行的位置
 int g_questTarget = -1;     // 给谁选任务：-1 = 全局，>=0 = cfg.sets[i]
 char g_search[96] = {};
@@ -244,7 +246,7 @@ void DrawIcon(ImDrawList* dl, Icon ic, ImVec2 c, float r, ImU32 col)
 //  控件
 // ---------------------------------------------------------------------------
 // 胶囊按钮。一页最多一个主按钮（金色实心），其余是淡底金字；删除这类是不带底的淡红字。
-enum BtnStyle { kPrimary, kSecondary, kDanger };
+enum BtnStyle { kPrimary, kSecondary, kDanger, kDangerSolid };   // kDanger 红字无底，kDangerSolid 红底
 
 bool PillButton(const char* id, const char* label, float w, float h, BtnStyle style, Icon icon = (Icon)-1)
 {
@@ -257,6 +259,8 @@ bool PillButton(const char* id, const char* label, float w, float h, BtnStyle st
     const float rr = h * 0.5f;
     if (style == kPrimary) dl->AddRectFilled(a, b, act ? kGoldDown : (hov ? kGoldHot : kGold), rr);
     else if (style == kSecondary) dl->AddRectFilled(a, b, (hov || act) ? kSoftHot : kSoft, rr);
+    else if (style == kDangerSolid)
+        dl->AddRectFilled(a, b, act ? IM_COL32(186, 80, 60, 255) : (hov ? IM_COL32(226, 112, 90, 255) : IM_COL32(210, 96, 74, 255)), rr);
     else if (hov || act) dl->AddRectFilled(a, b, IM_COL32(232, 140, 110, 22), rr);
     if (Focused()) dl->AddRect(a - ImVec2(4, 4) * S, b + ImVec2(4, 4) * S, kGold, rr + 4 * S, 0, 2.0f * S);
     const float fs = style == kPrimary ? szBtn : szBody;
@@ -265,7 +269,7 @@ bool PillButton(const char* id, const char* label, float w, float h, BtnStyle st
     const float iconW = (int)icon >= 0 ? fs * 1.15f : 0.0f;
     const float x0 = (a.x + b.x - ts.x - iconW) * 0.5f;
     const float cy = (a.y + b.y) * 0.5f;
-    const ImU32 col = style == kPrimary ? kInk : (style == kDanger ? kWarn : kGold);
+    const ImU32 col = style == kPrimary ? kInk : style == kDanger ? kWarn : style == kDangerSolid ? IM_COL32(255, 247, 238, 255) : kGold;
     if ((int)icon >= 0) DrawIcon(dl, icon, ImVec2(x0 + fs * 0.42f, cy), fs * 0.48f, col);
     dl->AddText(font, fs, ImVec2(std::floor(x0 + iconW), std::floor(cy - ts.y * 0.5f)), col, label);
     return pressed;
@@ -701,14 +705,79 @@ void ReorderHint()
 }
 
 // 编辑页底部的「删除」：先弹框确认，确认了返回 true
+// 垃圾桶图标：盖子、提手、桶身、两道竖纹
+void DrawTrash(ImDrawList* dl, ImVec2 c, float r, ImU32 col)
+{
+    const float t = 1.8f * S;
+    dl->AddLine(ImVec2(c.x - r * 0.8f, c.y - r * 0.55f), ImVec2(c.x + r * 0.8f, c.y - r * 0.55f), col, t);
+    dl->AddRect(ImVec2(c.x - r * 0.28f, c.y - r * 0.85f), ImVec2(c.x + r * 0.28f, c.y - r * 0.55f), col, 1.5f * S, 0, t);
+    dl->AddRect(ImVec2(c.x - r * 0.58f, c.y - r * 0.38f), ImVec2(c.x + r * 0.58f, c.y + r * 0.85f), col, 3 * S,
+                ImDrawFlags_RoundCornersBottom, t);
+    dl->AddLine(ImVec2(c.x - r * 0.2f, c.y - r * 0.12f), ImVec2(c.x - r * 0.2f, c.y + r * 0.58f), col, t);
+    dl->AddLine(ImVec2(c.x + r * 0.2f, c.y - r * 0.12f), ImVec2(c.x + r * 0.2f, c.y + r * 0.58f), col, t);
+}
+
+// 一行居中的字
+void CenterLine(ImFont* f, float size, ImU32 col, const char* s)
+{
+    const float cw = ImGui::GetContentRegionAvail().x;
+    const ImVec2 ts = TextSize(f, size, s);
+    if (ts.x > cw) { Text(f, size, col, s, true); return; }   // 太长：换行，靠左
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddText(f, size, ImVec2(std::floor(q.x + (cw - ts.x) * 0.5f), q.y), col, s);
+    ImGui::Dummy(ImVec2(cw, ts.y));
+}
+
+// 编辑页底部的「删除」：先弹一张确认卡片（盖在面板正中，背后压暗）。
+// 焦点默认在「取消」上，免得手柄连按 A 误删；B / Esc 也是取消。确认删除返回 true
 bool DeleteButton(const std::string& what)
 {
-    if (PillButton("##del", "删除", ImGui::GetContentRegionAvail().x, 46 * S, kDanger)) ImGui::OpenPopup("confirm_del");
+    if (PillButton("##del", "删除", ImGui::GetContentRegionAvail().x, 46 * S, kDanger) || g_openDelete) {
+        g_openDelete = false;
+        ImGui::OpenPopup("confirm_del");
+    }
     bool yes = false;
-    if (ImGui::BeginPopup("confirm_del")) {
-        Text(fReg, szBody, kText, ("删除「" + what + "」？").c_str());
+    ImGui::SetNextWindowPos(ImVec2((g_panelMin.x + g_panelMax.x) * 0.5f, (g_panelMin.y + g_panelMax.y) * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(372 * S, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(26 * S, 26 * S));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 20 * S);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f * S);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.125f, 0.105f, 0.08f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.89f, 0.76f, 0.48f, 0.25f));
+    const bool open = ImGui::BeginPopupModal("confirm_del", nullptr,
+                                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+    if (open) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float cw = ImGui::GetContentRegionAvail().x;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float ir = 24 * S;
+        const ImVec2 ic(p.x + cw * 0.5f, p.y + ir);
+        dl->AddCircleFilled(ic, ir, IM_COL32(232, 140, 110, 36));
+        DrawTrash(dl, ic, 12 * S, kWarn);
+        ImGui::Dummy(ImVec2(cw, ir * 2 + 16 * S));
+        CenterLine(fBold, szBody * 1.15f, kTitle, ("删除「" + what + "」？").c_str());
         ImGui::Dummy(ImVec2(0, 6 * S));
-        if (PillButton("##yes", "删除", 200 * S, 40 * S, kPrimary)) { yes = true; ImGui::CloseCurrentPopup(); }
+        CenterLine(fReg, szSmall, kMuted, "删除后无法恢复");
+        ImGui::Dummy(ImVec2(0, 22 * S));
+        const float gap = 12 * S, bw = std::floor((cw - gap) * 0.5f), bh = 44 * S;
+        const bool cancel = PillButton("##no", "取消", bw, bh, kSecondary);
+        // 焦点放在「取消」上，并且显示焦点框：ImGui 在焦点框藏着时不认手柄 A
+        //（用鼠标点的「删除」再拿手柄按 A，不显示的话就没反应）
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+            ImGui::SetNavCursorVisible(true);
+        }
+        ImGui::SameLine(0, gap);
+        if (PillButton("##yes", "删除", bw, bh, kDangerSolid)) {
+            yes = true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (cancel || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     return yes;
@@ -1365,7 +1434,7 @@ void Init(float scale)
     c[ImGuiCol_ScrollbarGrabActive] = V(IM_COL32(226, 194, 122, 120));
     c[ImGuiCol_NavCursor] = V(kGold);
     c[ImGuiCol_TextSelectedBg] = V(IM_COL32(226, 194, 122, 80));
-    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.3f);
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.02f, 0.015f, 0.01f, 0.5f);   // 确认弹窗背后压暗
 }
 
 void DebugGo(int page, int editIndex)
@@ -1405,6 +1474,7 @@ std::string DebugCaptureWhy() { return g_capWhy; }
 
 void DebugSetSearch(const char* text) { std::snprintf(g_search, sizeof(g_search), "%s", text); }
 void DebugFocusName() { g_focusName = true; }
+void DebugOpenDelete() { g_openDelete = true; }
 bool DebugRowCenter(int i, float& x, float& y)
 {
     if (i < 0 || i >= (int)g_rowRects.size()) return false;
@@ -1458,6 +1528,8 @@ void Draw(Model& m, float screenW, float screenH)
     const ImVec2 pos(std::floor((screenW - W) * 0.5f - sideW * 0.25f), std::floor(cy - H * 0.5f));
     const ImVec2 fMin(pos.x, std::floor(cy - Hf * 0.5f)), fMax(pos.x + W, std::floor(cy - Hf * 0.5f) + Hf);
     g_frameH = Hf;
+    g_panelMin = pos;
+    g_panelMax = ImVec2(pos.x + W, pos.y + H);
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.0f);   // 底和边框自己画（按动画中的外框大小）

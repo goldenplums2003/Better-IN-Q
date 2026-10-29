@@ -61,6 +61,8 @@ std::string DebugCaptureWhy();
 void DebugSetSearch(const char* text);
 // 测试用：下一帧把键盘焦点放到编辑页（猫饭 / 套装）的名字框上（开始打字）；套装名字不合规的提示
 void DebugFocusName();
+// 测试 / 截图用：下一帧在编辑页直接弹出删除确认
+void DebugOpenDelete();
 // 测试用：这一帧列表（套装 / 猫饭）第 i 行的中心
 bool DebugRowCenter(int i, float& x, float& y);
 std::string DebugNameWarn();

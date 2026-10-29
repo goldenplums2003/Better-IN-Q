@@ -273,6 +273,16 @@ int wmain(int argc, wchar_t** argv)
         if (i == 29) g_shot = out + L"\\overlay_setedit.png";
         frame(0.25f, 0.35f, 0.25f);
     }
+    // 删除确认卡片
+    ui::DebugOpenDelete();
+    for (int i = 0; i < 4; ++i) {
+        if (i == 3) g_shot = out + L"\\overlay_delete.png";
+        ::Sleep(80);   // 背后压暗是 ImGui 按时间渐变的，等它到位再截
+        frame(0.25f, 0.35f, 0.25f);
+    }
+    SendMessageW(hw, WM_KEYDOWN, VK_ESCAPE, 0x00010001);
+    SendMessageW(hw, WM_KEYUP, VK_ESCAPE, 0xC0010001);
+    for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
     ui::DebugGo(6, 0);
     for (int i = 0; i < 30; ++i) frame(0.25f, 0.35f, 0.25f);
     ui::DebugGo(0, 0);

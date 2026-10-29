@@ -601,6 +601,40 @@ int main()
         m.reqSave = false;
     }
 
+    // 删除确认卡片：焦点默认在「取消」，A 不会误删；B 只关卡片不退页；往右到「删除」按 A 才删
+    {
+        LoadoutSet extra;
+        extra.name = "要删的";
+        cfg.sets.push_back(extra);
+        const int idx = (int)cfg.sets.size() - 1;
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(3, idx);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugOpenDelete();
+        for (int i = 0; i < 3; ++i) Frame();
+        CHECK(ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), "弹出删除确认");
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && cfg.FindSet("要删的") && ui::DebugPage() == 3,
+              "直接按 A：焦点在「取消」，关掉卡片，没删（%s）", PageName(ui::DebugPage()));
+        ui::DebugOpenDelete();
+        for (int i = 0; i < 3; ++i) Frame();
+        Press(ImGuiKey_GamepadFaceRight);
+        CHECK(!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && cfg.FindSet("要删的") && ui::DebugPage() == 3,
+              "按 B：只关卡片，没删，还在编辑页（%s）", PageName(ui::DebugPage()));
+        Press(ImGuiKey_GamepadFaceRight);
+        CHECK(ui::DebugPage() == 2, "卡片关了再按 B：才回套装列表（%s）", PageName(ui::DebugPage()));
+        ui::DebugGo(3, idx);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugOpenDelete();
+        for (int i = 0; i < 3; ++i) Frame();
+        Press(ImGuiKey_GamepadDpadRight);
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(!cfg.FindSet("要删的") && ui::DebugPage() == 2 && m.reqSave, "往右到「删除」按 A：删掉，回套装列表（%s）",
+              PageName(ui::DebugPage()));
+        m.reqSave = false;
+    }
+
     // 「只重置回据点」快捷键：设置页第三行，能录
     {
         ui::OnOpen(m);
