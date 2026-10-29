@@ -41,7 +41,7 @@ bool Ready();
 // 任务选的是「无」：不重开，只原地套用装备、道具、猫饭。
 // resetOnly：只重置回据点，不接任务、不套全套。
 void RequestRestart(const Config& cfg, bool resetOnly = false);
-// 面板里「原地换上这套」：不重开，原地套用这一套的装备、道具、猫饭
+// 面板里「原地换上」：不重开，原地套用这一套的装备、道具、猫饭
 void ApplySetInPlace(const Config& cfg, const std::string& name);
 
 // 每 100ms 调一次（CT 里 Lua 定时器做的事）

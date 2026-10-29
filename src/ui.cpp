@@ -844,7 +844,7 @@ void PageSetEdit(Model& m)
     }
     // 原地换上：设成这套，并且马上原地换装（不管任务选的什么），关面板
     ImGui::Dummy(ImVec2(0, 4 * S));
-    if (PillButton("##apply", "原地换上这套", ImGui::GetContentRegionAvail().x, 46 * S, kSecondary)) {
+    if (PillButton("##apply", "原地换上", ImGui::GetContentRegionAvail().x, 46 * S, kSecondary)) {
         c.activeSet = s.name;
         m.reqSave = true;
         m.reqApplySet = s.name;

@@ -597,7 +597,7 @@ bool WriteFood(const Config& cfg, int id)
     return true;
 }
 
-// 面板里「原地换上这套」：不管选的什么任务，原地套用这一套的装备、道具、猫饭
+// 面板里「原地换上」：不管选的什么任务，原地套用这一套的装备、道具、猫饭
 void ApplySetInPlace(const Config& cfg, const std::string& name)
 {
     if (!g_ready) { Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log"); return; }
@@ -745,7 +745,7 @@ void Tick(const Config& cfg)
             g.restart = 0;
             g.resetOnly = 0;
             g_foodGate.Disarm();
-            Chat("Better-IN-Q：重开被游戏挡住了，已复位，可以再按一次");
+            Chat("Better-IN-Q：重置失败，请重试");
             s_last = 0;
             s_since = now;
         }
