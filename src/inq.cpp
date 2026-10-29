@@ -385,7 +385,8 @@ bool Install(const Config& cfg, std::string& report)
     }
 
     // 缩短转场黑屏 / 快速重置
-    if (core) PatchValue<std::uint32_t>(kQuickReset, 4, 5, "快速重置", report);
+    if (core && cfg.quickReset) PatchValue<std::uint32_t>(kQuickReset, 4, 5, "快速重置", report);
+    else if (core) Log("快速重置：配置里关了，不改");
     if (cfg.quickBlackout) {
         PatchValue<float>(kBlackOut1, 1.4f, 0.1f, "转场黑屏1", report);
         PatchValue<float>(kBlackOut2, 0.5f, 0.1f, "转场黑屏2", report);
@@ -533,6 +534,7 @@ bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 int g_savedRadial = -1;   // CT 的 wassetting：套道具前「联动快捷栏」原来的值
 FoodGate g_foodGate;      // 读盘时写不写猫饭：只在插件重开的那一轮写（见 foodgate.h）
+constexpr ULONGLONG kStuckMs = 12000;   // 重开流程在一步上停这么久（不算读盘）就当卡住了
 
 // 诊断：重开后 30 秒里，任务状态和钩子事件有变化就写日志
 constexpr ULONGLONG kTraceMs = 30000;
@@ -593,6 +595,18 @@ bool WriteFood(const Config& cfg, int id)
     const std::int32_t v[8] = {f.hp, f.stamina, f.attack, f.defense, f.elemRes, f.skill[0], f.skill[1], f.skill[2]};
     for (int i = 0; i < 8; ++i) Wr<std::int32_t>(pf + 0x19A8 + i * 4, v[i]);
     return true;
+}
+
+// 面板里「原地换上这套」：不管选的什么任务，原地套用这一套的装备、道具、猫饭
+void ApplySetInPlace(const Config& cfg, const std::string& name)
+{
+    if (!g_ready) { Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log"); return; }
+    const LoadoutSet* set = cfg.FindSet(name);
+    if (!set) return;
+    QueueSet(*set);
+    if (g.food > 0 && WriteFood(cfg, (int)g.food)) Log("猫饭 %d 已原地写入", (int)g.food);
+    g_foodGate.Arm();   // 换完接着进任务：那次读盘也按这套的猫饭来
+    Chat("Better-IN-Q：已原地套用「" + name + "」");
 }
 
 void RequestRestart(const Config& cfg, bool resetOnly)
@@ -715,6 +729,27 @@ void Tick(const Config& cfg)
     // 猫饭：读盘期间一直写成预设（进任务时游戏按它给饭的效果）
     const bool loading = pload && Rd<std::uint32_t>(pload + 0x1D04) != 0;
     if (g_foodGate.Step(loading, g.restart, cfg.foodEveryQuest) && g.food > 0) WriteFood(cfg, (int)g.food);
+
+    // 看门狗：重开流程卡在某一步太久（读盘不算）就复位。比如营地接任务时游戏弹「已超出当前人数」
+    // 把接任务挡住了，状态机一直等下去，之后再按重开全被挡掉，只能退游戏
+    {
+        static int s_last = 0;
+        static ULONGLONG s_since = 0;
+        const ULONGLONG now = ::GetTickCount64();
+        const int r = g.restart;
+        if (r == 0 || loading || r != s_last) {
+            s_last = r;
+            s_since = now;
+        } else if (now - s_since > kStuckMs) {
+            Log("重开卡在第 %d 步 %llu 秒没动，复位", r, (unsigned long long)((now - s_since) / 1000));
+            g.restart = 0;
+            g.resetOnly = 0;
+            g_foodGate.Disarm();
+            Chat("Better-IN-Q：重开被游戏挡住了，已复位，可以再按一次");
+            s_last = 0;
+            s_since = now;
+        }
+    }
 
     // 钩子里攒下的提示
     const std::uint32_t m = g.message;

@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@ struct Config {
     std::string activeSet;      // 重开时套用的全套，空 = 不套用
     int food = 0;               // 每次进任务都吃的猫饭，0 = 不管
     bool quickBlackout = true;  // 缩短转场黑屏
+    bool quickReset = true;     // 快速重置（CT 的 +1B71596 4→5，重置时跳过一段流程）
     bool foodEveryQuest = false;  // 自己正常接任务出发时也换成插件的猫饭（关着 = 只有插件重开才换）
     int panelOpacity = 80;      // 面板不透明度 %，越小越透
     int debug = 0;
@@ -43,8 +45,9 @@ struct Config {
     std::string hkResetOnly;    // 只重置回据点（不接任务），默认不设
     std::string hkPanel = "View+Menu | Insert";
 
-    std::vector<LoadoutSet> sets;
+    std::vector<LoadoutSet> sets;         // 面板里就按这个顺序列
     std::map<int, FoodPreset> foods;
+    std::vector<int> foodOrder;           // 猫饭在面板里的顺序（按编号；没列到的排在后面）
 
     const LoadoutSet* FindSet(const std::string& n) const {
         for (const auto& s : sets) if (s.name == n) return &s;
@@ -54,6 +57,15 @@ struct Config {
     int EffectiveQuest() const {
         const LoadoutSet* s = activeSet.empty() ? nullptr : FindSet(activeSet);
         return (s && s->quest) ? s->quest : questId;
+    }
+    // 猫饭按面板里的顺序排好的编号
+    std::vector<int> FoodIds() const {
+        std::vector<int> r;
+        for (int id : foodOrder)
+            if (foods.count(id) && std::find(r.begin(), r.end(), id) == r.end()) r.push_back(id);
+        for (const auto& kv : foods)
+            if (std::find(r.begin(), r.end(), kv.first) == r.end()) r.push_back(kv.first);
+        return r;
     }
     // 猫饭在面板里显示的名字
     std::string FoodName(int id) const {

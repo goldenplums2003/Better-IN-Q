@@ -21,7 +21,7 @@ namespace {
 
 HMODULE g_module = nullptr;
 volatile LONG g_stop = 0;
-const char* const kVersion = "0.6.10";
+const char* const kVersion = "0.7.0";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -209,6 +209,11 @@ DWORD WINAPI Worker(LPVOID)
             ui::Model& m = g_model;
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
             if (m.reqRestart) { m.reqRestart = false; Log("panel: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
+            if (!m.reqApplySet.empty()) {
+                Log("panel: apply set in place");
+                inq::ApplySetInPlace(g_cfg, m.reqApplySet);
+                m.reqApplySet.clear();
+            }
             if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
                 m.reqSave = false;
                 inq::ApplyOptions(g_cfg);

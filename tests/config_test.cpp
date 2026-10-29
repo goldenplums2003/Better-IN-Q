@@ -177,6 +177,24 @@ int main()
         ::DeleteFileW(p.c_str());
     }
 
+    // 猫饭顺序：存了能读回来；顺序表里没有的排在后面，删掉的不出现
+    {
+        Config c;
+        c.foods[1].hp = 1;
+        c.foods[2].hp = 2;
+        c.foods[3].hp = 3;
+        c.foodOrder = {3, 9, 1};
+        const std::vector<int> ids = c.FoodIds();
+        CHECK(ids == std::vector<int>({3, 1, 2}), "顺序表 3,9,1 + 没列到的 2 → 3,1,2（9 不存在，跳过）");
+        const std::wstring p = L"out\\config_test_order.ini";
+        SaveConfig(p, c);
+        Config r;
+        std::string err;
+        LoadConfig(p, r, err);
+        CHECK(r.FoodIds() == std::vector<int>({3, 1, 2}), "存了读回来顺序不变");
+        ::DeleteFileW(p.c_str());
+    }
+
     // 0.6.4：任务「无」、猫饭名字、只重置回据点的快捷键，存了能原样读回来
     {
         Config c;

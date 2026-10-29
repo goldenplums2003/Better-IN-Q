@@ -29,6 +29,7 @@ struct Model {
     std::vector<LoadoutName> itemNames;   // 游戏里的道具套装名（按显示编号）
 
     bool reqRestart = false;              // 立刻重开
+    std::string reqApplySet;              // 原地换上这一套（套装名）
     bool reqSave = false;                 // 配置改了，存盘并生效
     bool reqClose = false;                // 关面板
 
@@ -60,6 +61,8 @@ std::string DebugCaptureWhy();
 void DebugSetSearch(const char* text);
 // 测试用：下一帧把键盘焦点放到编辑页（猫饭 / 套装）的名字框上（开始打字）；套装名字不合规的提示
 void DebugFocusName();
+// 测试用：这一帧列表（套装 / 猫饭）第 i 行的中心
+bool DebugRowCenter(int i, float& x, float& y);
 std::string DebugNameWarn();
 
 } // namespace ui

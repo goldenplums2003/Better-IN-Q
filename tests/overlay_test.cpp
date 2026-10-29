@@ -110,6 +110,33 @@ int wmain(int argc, wchar_t** argv)
     CHECK((s.Gamepad.wButtons & M) == M, "已经放行后再凑组合：不再拦（游戏那边菜单已经开了）");
     Pad(s, 0); padfilter::TestFilter(0, &s);
 
+    // 组合里有出招键（Y+视图键）：Y 照常立刻给游戏，只扣视图键
+    {
+        const WORD Y = XINPUT_GAMEPAD_Y;
+        padfilter::SetChord(Y | V);
+        Pad(s, Y); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == Y, "Y+视图键 当组合：单按 Y 立刻给游戏（登龙之类的连招不被吞）");
+        Pad(s, Y | XINPUT_GAMEPAD_B); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == (Y | XINPUT_GAMEPAD_B), "Y+B 一起按：原样给游戏");
+        Pad(s, 0); padfilter::TestFilter(0, &s);
+        Pad(s, Y); padfilter::TestFilter(0, &s);
+        Pad(s, Y | V); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == Y, "凑齐 Y+视图键：视图键扣住，Y 照给（游戏那边收到一下 Y）");
+        Pad(s, 0); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == 0, "松开：视图键不补发（组合不算点按）");
+        Pad(s, V); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == 0, "单按视图键：照旧先扣住");
+        Pad(s, 0); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == V, "松开：补发一次视图键");
+        for (int k = 0; k < 6; ++k) { Pad(s, 0); padfilter::TestFilter(0, &s); }
+        padfilter::SetChord(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_A);
+        Pad(s, XINPUT_GAMEPAD_LEFT_SHOULDER); padfilter::TestFilter(0, &s);
+        CHECK(s.Gamepad.wButtons == XINPUT_GAMEPAD_LEFT_SHOULDER, "组合里没有视图键 / 菜单键：什么都不扣");
+        Pad(s, 0); padfilter::TestFilter(0, &s);
+        padfilter::SetChord(V | M);
+    }
+    Pad(s, 0); padfilter::TestFilter(0, &s);
+
     padfilter::SetBlock(true);
     Pad(s, A | XINPUT_GAMEPAD_DPAD_UP); s.Gamepad.bRightTrigger = 255; s.Gamepad.sThumbLX = 30000;
     padfilter::TestFilter(0, &s);
@@ -176,6 +203,14 @@ int wmain(int argc, wchar_t** argv)
 
     for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
     CHECK(g_draws == 0, "面板关着：一次都没画");
+    // 不开面板就不碰游戏的 Present：交换链虚表里那一格还是系统原来的（别的模组启动时看到的是原样）
+    void** const scVt = *reinterpret_cast<void***>(sc);
+    void* const presentOrig = scVt[8];
+    void* const resizeOrig = scVt[13];
+    HMODULE presentMod = nullptr;
+    ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(presentOrig), &presentMod);
+    CHECK(presentMod && presentMod != ::GetModuleHandleW(nullptr), "面板没开过：Present 还是系统的（不在测试程序里）");
     auto pump = [] {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
@@ -280,6 +315,38 @@ int wmain(int argc, wchar_t** argv)
     overlay::SetOpen(false);
     frame(0, 0, 0);
     CHECK(g_draws == drawsBefore + 4, "关掉后不再画");
+    CHECK(scVt[8] == presentOrig && scVt[13] == resizeOrig, "关面板后过一帧：Present / ResizeBuffers 都还回去了");
+    hr = sc->ResizeBuffers(0, 1600, 900, DXGI_FORMAT_UNKNOWN, 0);
+    CHECK(SUCCEEDED(hr), "关着面板时游戏改分辨率：成功（手上没留后台缓冲，hr=%08lx）", (unsigned long)hr);
+    for (int i = 0; i < 2; ++i) frame(0, 0, 0);
+    overlay::SetOpen(true);
+    CHECK(scVt[8] != presentOrig, "再打开：又挂上了");
+    for (int i = 0; i < 3; ++i) frame(0.25f, 0.35f, 0.25f);
+    CHECK(g_draws == drawsBefore + 7, "再打开照常画（draws=%d）", g_draws);
+    // 关着的时候有别的模组接手了 Present（把我们当原函数存着）：不能还，否则把它的链弄断
+    overlay::SetOpen(false);
+    static void* s_otherOrig = nullptr;
+    struct Other {
+        static HRESULT WINAPI Present(IDXGISwapChain* s, UINT a, UINT b)
+        {
+            return reinterpret_cast<HRESULT(WINAPI*)(IDXGISwapChain*, UINT, UINT)>(s_otherOrig)(s, a, b);
+        }
+    };
+    {
+        DWORD old = 0;
+        ::VirtualProtect(&scVt[8], sizeof(void*), PAGE_READWRITE, &old);
+        s_otherOrig = scVt[8];
+        scVt[8] = reinterpret_cast<void*>(&Other::Present);
+        ::VirtualProtect(&scVt[8], sizeof(void*), old, &old);
+    }
+    for (int i = 0; i < 3; ++i) frame(0, 0, 0);
+    CHECK(scVt[8] == reinterpret_cast<void*>(&Other::Present), "Present 被别的模组接手了：我们不还，留在它的链上");
+    CHECK(g_draws == drawsBefore + 7, "关着：照常不画");
+    overlay::SetOpen(true);
+    for (int i = 0; i < 2; ++i) frame(0.25f, 0.35f, 0.25f);
+    CHECK(g_draws == drawsBefore + 9, "再打开：经它的链照样画（draws=%d）", g_draws);
+    overlay::SetOpen(false);
+    frame(0, 0, 0);
     pump();
     HIMC imc1 = ImmGetContext(hw);
     CHECK(imc1 == imc0, "关面板：输入法还回去了");

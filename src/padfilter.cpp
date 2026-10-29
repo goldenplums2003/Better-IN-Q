@@ -61,18 +61,22 @@ void Filter(DWORD i, XINPUT_STATE* s)
         }
     }
 
+    // 只扣视图键、菜单键：它们单按在游戏里是开地图 / 菜单，晚 0.1 秒没关系。组合里别的键
+    //（比如 Y+视图键 里的 Y）是出招键，扣住会把连招吞掉（太刀登龙、气刃斩），所以照常立刻给游戏
     const unsigned short c = g_chord.load();
-    if (!c) return;
-    const unsigned short down = g.wButtons & c;
+    const unsigned short w = c & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START);
+    if (!w) return;
+    const unsigned short down = g.wButtons & w;
+    const bool full = (g.wButtons & c) == c;   // 整个组合都按着
     const ULONGLONG now = ::GetTickCount64();
     switch (p.st) {
     case Pad::kIdle:
-        if (down == c) p.st = Pad::kChord;
+        if (full) p.st = Pad::kChord;
         else if (down) { p.st = Pad::kPending; p.t0 = now; p.pend = down; }
         break;
     case Pad::kPending:
         p.pend |= down;
-        if (down == c) p.st = Pad::kChord;
+        if (full) p.st = Pad::kChord;
         else if (!down) { p.pulse = kPulsePolls; p.pulseMask = p.pend; p.st = Pad::kIdle; }   // 点一下就松：补发
         else if (now - p.t0 > kChordWindowMs) p.st = Pad::kPass;
         break;
@@ -81,7 +85,7 @@ void Filter(DWORD i, XINPUT_STATE* s)
         if (!down) p.st = Pad::kIdle;
         break;
     }
-    if (p.st == Pad::kPending || p.st == Pad::kChord) g.wButtons &= ~c;
+    if (p.st == Pad::kPending || p.st == Pad::kChord) g.wButtons &= ~w;
     if (p.pulse > 0) { g.wButtons |= p.pulseMask; --p.pulse; }
 }
 

@@ -15,9 +15,23 @@ static int g_fail = 0;
 
 typedef BOOL(WINAPI* SetPosFn)(int, int);
 typedef BOOL(WINAPI* GetPosFn)(LPPOINT);
+typedef GetPosFn GetPosFnT;
 typedef BOOL(WINAPI* ClipFn)(const RECT*);
 
 static bool Same(const POINT& a, const POINT& b) { return a.x == b.x && a.y == b.y; }
+
+// 读真实光标和读「游戏看到的」之间，人可能正好在动鼠标：对不上就再读几次，有一次对上就算
+template <class F> static bool SameSoon(F hooked, GetPosFnT real, POINT& a)
+{
+    for (int i = 0; i < 20; ++i) {
+        POINT b{};
+        hooked(&a);
+        real(&b);
+        if (Same(a, b)) return true;
+        ::Sleep(10);
+    }
+    return false;
+}
 static bool Same(const RECT& a, const RECT& b)
 {
     return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
@@ -39,16 +53,18 @@ int main()
 
     // ---- 面板关着：原样放行 ----
     POINT a{}, b{};
-    ::GetCursorPos(&a);
-    realGet(&b);
-    CHECK(Same(a, b), "关着：GetCursorPos 读到真实位置 (%ld,%ld)", a.x, a.y);
+    CHECK(SameSoon(::GetCursorPos, realGet, a), "关着：GetCursorPos 读到真实位置 (%ld,%ld)", a.x, a.y);
+    (void)b;
 
     // ---- 面板开着：游戏挪不动光标，读到的是它想放的位置 ----
     cursorfilter::SetBlock(true);
-    POINT start{}, g{};
-    realGet(&start);
+    // 冻住 = 隔一会儿再读还是同一个位置（这期间真实光标动没动都一样）
+    POINT start{}, g{}, g2{};
     ::GetCursorPos(&g);
-    CHECK(Same(g, start), "开面板那一刻的位置被冻住 (%ld,%ld)", g.x, g.y);
+    ::Sleep(60);
+    ::GetCursorPos(&g2);
+    CHECK(Same(g, g2), "开面板那一刻的位置被冻住 (%ld,%ld)", g.x, g.y);
+    start = g;
     const POINT t{start.x > 100 ? start.x - 50 : start.x + 50, start.y > 100 ? start.y - 50 : start.y + 50};
     CHECK(::SetCursorPos(t.x, t.y), "开着：SetCursorPos 返回成功");
     POINT now{};
@@ -99,9 +115,7 @@ int main()
     }
 
     // ---- 关着：又原样放行 ----
-    ::GetCursorPos(&a);
-    realGet(&b);
-    CHECK(Same(a, b), "关着：GetCursorPos 又读真实位置");
+    CHECK(SameSoon(::GetCursorPos, realGet, a), "关着：GetCursorPos 又读真实位置");
     CHECK(::ClipCursor(&r), "关着：ClipCursor 直接生效");
     ::GetClipCursor(&c);
     CHECK(Same(c, r), "关着：锁定范围 = 游戏要的");

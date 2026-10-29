@@ -479,6 +479,128 @@ int main()
         }
     }
 
+    // 套装编辑页「原地换上这套」：设成当前套装，请求原地换装并关面板
+    {
+        const int idx = ActiveIndex(cfg);
+        const std::string before = cfg.activeSet;
+        LoadoutSet other;
+        other.name = "第二套";
+        cfg.sets.push_back(other);
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(3, (int)cfg.sets.size() - 1);
+        for (int i = 0; i < 4; ++i) Frame();
+        // 焦点在「装备套装」，往下：道具套装、联动快捷栏、猫饭、任务、确认、原地换上这套
+        for (int i = 0; i < 6; ++i) Press(ImGuiKey_GamepadDpadDown);
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(cfg.activeSet == "第二套" && m.reqApplySet == "第二套" && m.reqClose && m.reqSave,
+              "按「原地换上这套」：设成当前套装、请求原地换装、关面板（active=%s, apply=%s）", cfg.activeSet.c_str(),
+              m.reqApplySet.c_str());
+        m.reqApplySet.clear();
+        m.reqClose = m.reqSave = false;
+        cfg.sets.pop_back();
+        cfg.activeSet = before;
+        (void)idx;
+    }
+
+    // 排序：手柄选中一行按 LB / RB 上下挪，焦点跟着它；键盘 Ctrl + 上下；鼠标按住拖
+    {
+        const std::vector<LoadoutSet> setsBefore = cfg.sets;
+        const std::string activeBefore = cfg.activeSet;
+        cfg.sets.clear();
+        for (const char* n : {"甲", "乙", "丙"}) { LoadoutSet s; s.name = n; cfg.sets.push_back(s); }
+        cfg.activeSet = "甲";
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(2, 0);
+        for (int i = 0; i < 4; ++i) Frame();                 // 焦点在正在用的「甲」上
+        Press(ImGuiKey_GamepadR1);
+        Press(ImGuiKey_GamepadR1);
+        CHECK(cfg.sets[0].name == "乙" && cfg.sets[1].name == "丙" && cfg.sets[2].name == "甲" && m.reqSave,
+              "「甲」按两下 RB：乙 丙 甲（%s %s %s）", cfg.sets[0].name.c_str(), cfg.sets[1].name.c_str(),
+              cfg.sets[2].name.c_str());
+        Press(ImGuiKey_GamepadR1);
+        CHECK(cfg.sets[2].name == "甲", "已经在最底下：再按 RB 不动");
+        Press(ImGuiKey_GamepadL1);
+        CHECK(cfg.sets[0].name == "乙" && cfg.sets[1].name == "甲" && cfg.sets[2].name == "丙",
+              "焦点一直跟着「甲」：LB 把它往上挪一格（%s %s %s）", cfg.sets[0].name.c_str(), cfg.sets[1].name.c_str(),
+              cfg.sets[2].name.c_str());
+        Press(ImGuiKey_GamepadFaceDown);
+        CHECK(ui::DebugPage() == 3, "挪完按 A：照常进编辑页（%s）", PageName(ui::DebugPage()));
+        // 键盘 Ctrl + 下
+        cfg.sets.clear();
+        for (const char* n : {"甲", "乙", "丙"}) { LoadoutSet s; s.name = n; cfg.sets.push_back(s); }
+        ui::DebugGo(2, 0);
+        for (int i = 0; i < 4; ++i) Frame();
+        ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+        Press(ImGuiKey_DownArrow);
+        ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+        Frame();
+        CHECK(cfg.sets[0].name == "乙" && cfg.sets[1].name == "甲", "Ctrl+下：「甲」往下挪一格（%s %s %s）", cfg.sets[0].name.c_str(),
+              cfg.sets[1].name.c_str(), cfg.sets[2].name.c_str());
+
+        // 鼠标：按住第一行拖到第三行再松开 = 挪过去，松开不算点开；单击一行照常打开
+        {
+            cfg.sets.clear();
+            for (const char* n : {"甲", "乙", "丙"}) { LoadoutSet s; s.name = n; cfg.sets.push_back(s); }
+            ui::DebugGo(2, 0);
+            for (int i = 0; i < 4; ++i) Frame();
+            float x0, y0, x2, y2;
+            const bool rows = ui::DebugRowCenter(0, x0, y0) && ui::DebugRowCenter(2, x2, y2);
+            CHECK(rows, "拿到列表各行的位置");
+            ImGuiIO& io = ImGui::GetIO();
+            io.AddMousePosEvent(x0, y0);
+            Frame();
+            io.AddMouseButtonEvent(0, true);
+            Frame();
+            for (int k = 1; k <= 12; ++k) {                // 慢慢往下拖到第三行
+                io.AddMousePosEvent(x0, y0 + (y2 - y0) * k / 12.0f);
+                Frame();
+            }
+            io.AddMouseButtonEvent(0, false);
+            Frame();
+            Frame();
+            CHECK(cfg.sets[2].name == "甲" && ui::DebugPage() == 2, "鼠标把「甲」拖到最下面：%s %s %s，松开没打开编辑页（%s）",
+                  cfg.sets[0].name.c_str(), cfg.sets[1].name.c_str(), cfg.sets[2].name.c_str(), PageName(ui::DebugPage()));
+            float x1, y1;
+            ui::DebugRowCenter(1, x1, y1);
+            io.AddMousePosEvent(x1, y1);
+            Frame();
+            io.AddMouseButtonEvent(0, true);
+            Frame();
+            io.AddMouseButtonEvent(0, false);
+            Frame();
+            Frame();
+            CHECK(ui::DebugPage() == 3, "单击一行（没拖）：照常进编辑页（%s）", PageName(ui::DebugPage()));
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+            Frame();
+        }
+        cfg.sets = setsBefore;
+        cfg.activeSet = activeBefore;
+        m.reqSave = false;
+
+        // 猫饭：挪完记进顺序表
+        const std::map<int, FoodPreset> foodsBefore = cfg.foods;
+        const int foodBefore = cfg.food;
+        cfg.foods.clear();
+        cfg.foods[1].hp = 1;
+        cfg.foods[2].hp = 2;
+        cfg.foods[3].hp = 3;
+        cfg.foodOrder.clear();
+        cfg.food = 3;
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(4, 0);
+        for (int i = 0; i < 4; ++i) Frame();                 // 焦点在正在吃的 3 上
+        Press(ImGuiKey_GamepadL1);
+        Press(ImGuiKey_GamepadL1);
+        CHECK(cfg.FoodIds() == std::vector<int>({3, 1, 2}) && m.reqSave, "猫饭 3 挪到最上面：顺序 3,1,2");
+        cfg.foods = foodsBefore;
+        cfg.food = foodBefore;
+        cfg.foodOrder.clear();
+        m.reqSave = false;
+    }
+
     // 「只重置回据点」快捷键：设置页第三行，能录
     {
         ui::OnOpen(m);

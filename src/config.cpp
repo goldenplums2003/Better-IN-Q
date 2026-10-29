@@ -69,8 +69,14 @@ std::string Render(const Config& c)
     o += kv("ActiveSet", c.activeSet, "重开时套用的全套（下面 [Set.名字]），空 = 不套");
     o += kv("Food", num(c.food), "每次进任务都吃的猫饭（下面 [Food.编号]），0 = 不管");
     o += kv("QuickBlackout", num(c.quickBlackout), "缩短转场黑屏");
+    o += kv("QuickReset", num(c.quickReset), "快速重置（下次开游戏生效）");
     o += kv("FoodEveryQuest", num(c.foodEveryQuest), "1 = 自己正常接任务也换成插件的猫饭，0 = 只有插件重开才换");
     o += kv("PanelOpacity", num(c.panelOpacity), "面板不透明度 30~100");
+    if (!c.foods.empty()) {
+        std::string order;
+        for (int id : c.FoodIds()) order += (order.empty() ? "" : ",") + num(id);
+        o += kv("FoodOrder", order, "猫饭在面板里的顺序");
+    }
     if (c.debug) o += kv("Debug", num(c.debug), "");
     o += "\r\n[Hotkeys]\r\n";
     o += "; 手柄：A B X Y LB RB LT RT LS RS Up Down Left Right View Menu\r\n";
@@ -178,9 +184,19 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
             else if (k == "ActiveSet") cfg.activeSet = v;
             else if (k == "Food") cfg.food = n;
             else if (k == "QuickBlackout") cfg.quickBlackout = Bool(v);
+            else if (k == "QuickReset") cfg.quickReset = Bool(v);
             else if (k == "FoodEveryQuest") cfg.foodEveryQuest = Bool(v);
             else if (k == "PanelOpacity") cfg.panelOpacity = n < 30 ? 30 : (n > 100 ? 100 : n);
             else if (k == "Debug") cfg.debug = n;
+            else if (k == "FoodOrder") {
+                for (std::size_t p = 0; p <= v.size();) {
+                    std::size_t e = v.find(',', p);
+                    if (e == std::string::npos) e = v.size();
+                    const std::string t = Trim(v.substr(p, e - p));
+                    if (!t.empty()) cfg.foodOrder.push_back(std::atoi(t.c_str()));
+                    p = e + 1;
+                }
+            }
         } else if (sec == "Hotkeys") {
             if (k == "Restart") cfg.hkRestart = v;
             else if (k == "ResetOnly") cfg.hkResetOnly = v;

@@ -11,6 +11,7 @@
 #include <dxgi1_4.h>
 #include <imm.h>
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 #include <cfloat>
@@ -147,6 +148,45 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
     return ::CallWindowProcW(g_wndProc, h, msg, w, l);
 }
 
+// 虚表里的一格。挂的时候记下原来的；还的时候只有这一格还是我们的才还 —— 之后被别的模组接手了
+// （它把我们当成「原函数」存着）就留在链上，关着面板时我们照常放行
+struct Slot {
+    void** at = nullptr;
+    void* hook = nullptr;
+    void** orig = nullptr;
+    bool on = false;
+};
+
+bool WriteSlot(void** at, void* v)
+{
+    DWORD old = 0;
+    if (!::VirtualProtect(at, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *at = v;
+    ::VirtualProtect(at, sizeof(void*), old, &old);
+    return true;
+}
+
+bool Hook(Slot& s)
+{
+    if (!s.at) return false;
+    if (*s.at == s.hook) { s.on = true; return true; }   // 上次没还掉，还挂着
+    void* const prev = *s.at;
+    *s.orig = prev;                                      // 先记原函数再换：换完的下一瞬间就可能有人调进来
+    if (!WriteSlot(s.at, s.hook)) return false;
+    s.on = true;
+    return true;
+}
+
+// 还回去了返回 true；被别人接手了（留在链上）返回 false
+bool Unhook(Slot& s)
+{
+    if (!s.on || !s.at) return true;
+    if (*s.at != s.hook) return false;
+    if (!WriteSlot(s.at, *s.orig)) return false;
+    s.on = false;
+    return true;
+}
+
 bool PatchSlot(void** slot, void* hook, void** orig)
 {
     DWORD old = 0;
@@ -173,6 +213,9 @@ bool CreateRtv(IDXGISwapChain* sc)
 }
 
 // ================================================================ D3D12
+Slot g_slotExecute;
+std::mutex g_hookMx;   // 挂 / 还交换链的钩子（主循环开面板时挂，渲染线程关面板后还）
+
 void WINAPI HkExecute(ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists)
 {
     ID3D12Device* want = g_wantQueueOf.load();
@@ -181,7 +224,11 @@ void WINAPI HkExecute(ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* l
         if (SUCCEEDED(q->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&d))) && d) {
             if (d == want) {
                 ID3D12CommandQueue* expected = nullptr;
-                if (g_queue.compare_exchange_strong(expected, q)) Log("overlay: 记下游戏的 D3D12 命令队列 %p", (void*)q);
+                if (g_queue.compare_exchange_strong(expected, q)) {
+                    Log("overlay: 记下游戏的 D3D12 命令队列 %p", (void*)q);
+                    std::lock_guard<std::mutex> lk(g_hookMx);
+                    Unhook(g_slotExecute);   // 队列拿到了就不用再看游戏提交命令了（提交我们自己的命令用原函数）
+                }
             }
             d->Release();
         }
@@ -198,7 +245,12 @@ bool HookExecute(ID3D12Device* dev)
     ID3D12CommandQueue* tmp = nullptr;
     if (FAILED(dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&tmp))) || !tmp) return false;
     void** vt = *reinterpret_cast<void***>(tmp);
-    const bool ok = PatchSlot(&vt[10], reinterpret_cast<void*>(HkExecute), reinterpret_cast<void**>(&g_execute));
+    g_slotExecute = {&vt[10], reinterpret_cast<void*>(HkExecute), reinterpret_cast<void**>(&g_execute), false};
+    bool ok;
+    {
+        std::lock_guard<std::mutex> lk(g_hookMx);
+        ok = Hook(g_slotExecute);
+    }
     tmp->Release();
     Log("overlay: %s ExecuteCommandLists", ok ? "已挂" : "挂不上");
     return ok;
@@ -264,6 +316,7 @@ int InitD3D12Objects(IDXGISwapChain* sc, ID3D12Device* dev)
 void Render12(IDXGISwapChain* sc, ImDrawData* dd)
 {
     ID3D12CommandQueue* q = g_queue.load();
+    if (!g_sc3 && (FAILED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&g_sc3))) || !g_sc3)) return;
     const UINT i = g_sc3->GetCurrentBackBufferIndex();
     if (i >= kMaxBuffers) return;
     // 每帧现拿后台缓冲、用完就放：不长期持有引用，游戏 ResizeBuffers / 重建交换链都不受影响
@@ -401,7 +454,10 @@ bool IsGameSwapChain(IDXGISwapChain* sc)
                d.BufferDesc.Format == g_bbFormat &&
                SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc3)));
         if (dev) dev->Release();
-        if (same) { g_sc3->Release(); g_sc3 = sc3; }
+        if (same) {
+            if (g_sc3) g_sc3->Release();
+            g_sc3 = sc3;
+        }
     }
     if (!same) { g_foreign = sc; return false; }
     g_sc = sc;
@@ -457,8 +513,13 @@ void RenderPanel(IDXGISwapChain* sc)
     }
 }
 
+void ReleaseForClose();
+void UnhookSwapChain();
+extern std::atomic<bool> g_cleaned;
+
 HRESULT WINAPI HkPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
 {
+    const PresentFn orig = g_present;
     if (!g_failed.load() && !(flags & DXGI_PRESENT_TEST)) {
         // 第一次打开面板才初始化（要读字体文件），从没打开过就完全不碰游戏的渲染
         if (!g_inited && g_open.load()) {
@@ -473,7 +534,13 @@ HRESULT WINAPI HkPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
         }
         if (g_inited && IsGameSwapChain(sc)) RenderPanel(sc);
     }
-    return g_present(sc, sync, flags);
+    // 面板关了：放掉手上的后台缓冲，把钩子还回去，之后游戏的 Present 不再经过这里。
+    // 只在游戏自己的交换链上做（就是渲染线程，不会和正在画的那一帧打架）
+    if (!g_open.load() && !g_cleaned.load() && (!g_inited || sc == g_sc)) {
+        ReleaseForClose();
+        UnhookSwapChain();
+    }
+    return orig(sc, sync, flags);
 }
 
 // 游戏要换后台缓冲：D3D11 先放掉手上的 RTV；D3D12 等自己提交的命令跑完（缓冲本来就不长期持有）
@@ -495,6 +562,35 @@ HRESULT WINAPI HkResize1(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMA
 {
     BeforeResize(sc);
     return g_resize1(sc, n, w, h, f, flags, mask, queues);
+}
+
+// ---- 交换链的钩子：第一次打开面板时才挂，关面板后还回去 ----
+// 不开面板就完全不碰游戏的 Present。别的模组（比如 DLSS4 的 NVIDIA Reflex）启动时检查、挂钩
+// 看到的都是原样的交换链；我们开面板时接在它们后面，关面板再还回去。
+Slot g_slotPresent, g_slotResize, g_slotResize1;
+bool g_vtTried = false;
+std::atomic<bool> g_cleaned{true};   // 这次关面板后已经收拾过了（被别人接手、还不掉时，每帧都会进来，只收拾一次）
+
+void ReleaseForClose()
+{
+    g_wasOpen = false;
+    if (g_api == kD3D11) {
+        ReleaseRtv();
+    } else if (g_api == kD3D12) {
+        WaitGpu12();   // 我们提交的命令跑完，才不再碰后台缓冲
+        if (g_sc3) { g_sc3->Release(); g_sc3 = nullptr; }
+    }
+}
+
+void UnhookSwapChain()
+{
+    std::lock_guard<std::mutex> lk(g_hookMx);
+    if (g_open.load()) return;   // 这一瞬间又开了：别还
+    g_cleaned = true;
+    if (!g_slotPresent.on) return;
+    const bool a = Unhook(g_slotPresent), b = Unhook(g_slotResize), c = Unhook(g_slotResize1);
+    Log(a && b && c ? "overlay: 面板关了，Present 还回去了"
+                    : "overlay: 面板关了；Present 已经被别的模组接手，我们留在它的链上照常放行");
 }
 
 // 建一个临时窗口和交换链，只为拿到交换链的虚表（D3D11 和 D3D12 的交换链是同一个类，共用这张表）
@@ -547,27 +643,43 @@ void** GetSwapChainVtable(std::string& err, void*** vt3)
 
 } // namespace
 
-bool Install(const Callbacks& cb, std::string& err)
+bool Install(const Callbacks& cb, std::string&)
 {
     g_cb = cb;
-    void** vt3 = nullptr;
-    void** vt = GetSwapChainVtable(err, &vt3);
-    if (!vt) return false;
-    // IDXGISwapChain 虚表：8 = Present，13 = ResizeBuffers；IDXGISwapChain3：39 = ResizeBuffers1（DX12 游戏可能用它）
-    if (!PatchSlot(&vt[8], reinterpret_cast<void*>(HkPresent), reinterpret_cast<void**>(&g_present)) ||
-        !PatchSlot(&vt[13], reinterpret_cast<void*>(HkResize), reinterpret_cast<void**>(&g_resize))) {
-        err = "改交换链虚表失败";
-        return false;
-    }
-    if (vt3 && !PatchSlot(&vt3[39], reinterpret_cast<void*>(HkResize1), reinterpret_cast<void**>(&g_resize1)))
-        Log("overlay: ResizeBuffers1 没挂上（不影响 D3D11）");
-    Log("overlay: Present 已挂（原 %p）", reinterpret_cast<void*>(g_present));
+    Log("overlay: 等第一次打开面板时再挂 Present（不开面板就不碰游戏的画面）");
     return true;
 }
+
+namespace {
+// 主循环里开面板时调。第一次先建临时交换链拿虚表
+bool HookSwapChain()
+{
+    std::lock_guard<std::mutex> lk(g_hookMx);
+    if (!g_vtTried) {
+        g_vtTried = true;
+        std::string err;
+        void** vt3 = nullptr;
+        void** vt = GetSwapChainVtable(err, &vt3);
+        if (!vt) { Log("overlay: %s，面板不可用", err.c_str()); return false; }
+        // IDXGISwapChain 虚表：8 = Present，13 = ResizeBuffers；IDXGISwapChain3：39 = ResizeBuffers1（DX12 游戏可能用它）
+        g_slotPresent = {&vt[8], reinterpret_cast<void*>(HkPresent), reinterpret_cast<void**>(&g_present), false};
+        g_slotResize = {&vt[13], reinterpret_cast<void*>(HkResize), reinterpret_cast<void**>(&g_resize), false};
+        if (vt3) g_slotResize1 = {&vt3[39], reinterpret_cast<void*>(HkResize1), reinterpret_cast<void**>(&g_resize1), false};
+    }
+    if (!g_slotPresent.at) return false;
+    if (g_slotPresent.on) return true;
+    if (!Hook(g_slotPresent) || !Hook(g_slotResize)) { Log("overlay: 改交换链虚表失败，面板不可用"); return false; }
+    if (g_slotResize1.at && !Hook(g_slotResize1)) Log("overlay: ResizeBuffers1 没挂上（不影响 D3D11）");
+    Log("overlay: 挂上 Present（原 %p）", reinterpret_cast<void*>(g_present));
+    return true;
+}
+} // namespace
 
 void SetOpen(bool open)
 {
     if (open && !g_open.load()) g_openAt = ::GetTickCount64();
+    if (open && !g_failed.load() && !HookSwapChain()) g_failed = true;
+    if (open) g_cleaned = false;
     g_open = open && !g_failed.load();
     if (g_wndProc && g_hwnd) ::PostMessageW(g_hwnd, WM_NULL, 0, 0);   // 输入法摘下 / 还回去
 }

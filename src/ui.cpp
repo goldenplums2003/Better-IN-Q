@@ -51,6 +51,11 @@ int g_nameFor = -1;         // 名字框现在装的是哪一份猫饭 / 哪一�
 char g_nameBuf[64] = {};
 bool g_focusName = false;
 std::string g_nameWarn;     // 套装名字不合规（空的、重名）的提示
+
+// 排序：鼠标按住一行上下拖；手柄选中一行按 LB / RB 上下挪；键盘 Ctrl + 上下
+//（手柄 X 不能用：ImGui 拿它切菜单层，一按焦点就跑了）
+bool g_dragMoved = false;   // 这一下鼠标按住拖过位置：松开时别当成点开
+std::vector<ImRect> g_rowRects;   // 测试用：这一帧列表各行的位置
 int g_questTarget = -1;     // 给谁选任务：-1 = 全局，>=0 = cfg.sets[i]
 char g_search[96] = {};
 int g_scrollToSel = 0;      // 还要把选中的任务滚到视野里几帧（新建的列表头一帧还不知道自己多长，滚不过去）
@@ -658,6 +663,43 @@ void PageQuests(Model& m)
     ImGui::EndChild();
 }
 
+// 列表里能挪位置的一行（刚画完 Row 之后调）。i = 现在的位置，n = 总共几行。
+// 要挪就把目标位置写进 moveTo（画完整个列表再挪）。返回「点开」：拖过位置后松开的那一下不算
+bool ReorderRow(bool pressed, int i, int n, int& moveTo)
+{
+    if (i == 0) g_rowRects.clear();
+    g_rowRects.push_back(ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+    // 鼠标：按住拖出这一行，就和上 / 下一行换位置（这一行的 ID 跟着内容走，换完还按着它）
+    if (ImGui::IsItemActive() && !ImGui::IsItemHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        const int to = i + (ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y < 0 ? -1 : 1);
+        if (to >= 0 && to < n) {
+            moveTo = to;
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            g_dragMoved = true;
+        }
+    }
+    if (pressed && g_dragMoved) { g_dragMoved = false; pressed = false; }
+    // 手柄 LB / RB、键盘 Ctrl + 上下：选中的这一行挪一格（ID 跟着内容走，焦点留在它身上）
+    if (ImGui::IsItemFocused()) {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        int to = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1) || (ctrl && ImGui::IsKeyPressed(ImGuiKey_UpArrow))) to = i - 1;
+        else if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1) || (ctrl && ImGui::IsKeyPressed(ImGuiKey_DownArrow))) to = i + 1;
+        if (to != -1) {
+            if (ctrl) ImGui::NavMoveRequestCancel();   // Ctrl + 上下是挪这一行，不是挪焦点
+            if (to >= 0 && to < n) moveTo = to;
+        }
+    }
+    return pressed;
+}
+
+// 列表底下的操作提示
+void ReorderHint()
+{
+    ImGui::Dummy(ImVec2(0, 4 * S));
+    Text(fReg, szSmall, kFaint, "调整顺序：按住拖动，或选中后按 LB / RB", true);
+}
+
 // 编辑页底部的「删除」：先弹框确认，确认了返回 true
 bool DeleteButton(const std::string& what)
 {
@@ -678,15 +720,26 @@ void PageSets(Model& m)
     Config& c = *m.cfg;
     const int activeIdx = ActiveSetIndex(c);
     PageHeader("套装", activeIdx >= 0 ? ("重开时套用「" + c.activeSet + "」").c_str() : nullptr, false);
-    for (int i = 0; i < (int)c.sets.size(); ++i) {
-        ImGui::PushID(i);
-        if (Row("set", c.sets[i].name.c_str(), SetSummary(c, c.sets[i]).c_str(), i == activeIdx, 54 * S)) {
-            g_editSet = i;
-            Go(kSetEdit);
-        }
+    int from = -1, to = -1, open = -1;
+    const int n = (int)c.sets.size();
+    for (int i = 0; i < n; ++i) {
+        ImGui::PushID(c.sets[i].name.c_str());   // ID 跟着套装走：挪了位置焦点、拖动都还在它身上
+        const bool pressed = Row("set", c.sets[i].name.c_str(), SetSummary(c, c.sets[i]).c_str(), i == activeIdx, 54 * S);
+        int moveTo = -1;
+        if (ReorderRow(pressed, i, n, moveTo)) open = i;
+        if (moveTo >= 0) { from = i; to = moveTo; }
         if (i == (activeIdx >= 0 ? activeIdx : 0)) FocusDefault();
         ImGui::PopID();
     }
+    if (from >= 0) {
+        std::swap(c.sets[from], c.sets[to]);
+        m.reqSave = true;
+    }
+    if (open >= 0) {
+        g_editSet = open;
+        Go(kSetEdit);
+    }
+    if (n > 1) ReorderHint();
     ImGui::Dummy(ImVec2(0, 8 * S));
     const bool newSet = PillButton("##newset", "新建套装", ImGui::GetContentRegionAvail().x, 46 * S, kSecondary, kIcPlus);
     if (c.sets.empty()) FocusDefault();
@@ -767,10 +820,10 @@ void PageSetEdit(Model& m)
     std::vector<std::string> foods = {kNone};
     std::vector<int> foodIds = {0};
     int curF = 0;
-    for (const auto& f : c.foods) {
-        foods.push_back(c.FoodName(f.first));
-        foodIds.push_back(f.first);
-        if (f.first == s.food) curF = (int)foods.size() - 1;
+    for (int id : c.FoodIds()) {
+        foods.push_back(c.FoodName(id));
+        foodIds.push_back(id);
+        if (id == s.food) curF = (int)foods.size() - 1;
     }
     if (ValueRow("##fd", "猫饭", s.food ? c.FoodName(s.food).c_str() : kNone)) ImGui::OpenPopup("pick_fd");
     p = PickPopup("pick_fd", foods, curF);
@@ -789,6 +842,14 @@ void PageSetEdit(Model& m)
         m.reqSave = true;
         Go(kSets);
     }
+    // 原地换上：设成这套，并且马上原地换装（不管任务选的什么），关面板
+    ImGui::Dummy(ImVec2(0, 4 * S));
+    if (PillButton("##apply", "原地换上这套", ImGui::GetContentRegionAvail().x, 46 * S, kSecondary)) {
+        c.activeSet = s.name;
+        m.reqSave = true;
+        m.reqApplySet = s.name;
+        m.reqClose = true;
+    }
     ImGui::Dummy(ImVec2(0, 4 * S));
     if (DeleteButton(s.name)) {
         if (active) c.activeSet.clear();
@@ -805,16 +866,29 @@ void PageFood(Model& m)
     Config& c = *m.cfg;
     const bool has = c.foods.count(c.food) > 0;
     PageHeader("猫饭", has ? ("每次进任务都吃「" + c.FoodName(c.food) + "」").c_str() : nullptr, false);
-    for (auto& kv : c.foods) {
-        ImGui::PushID(kv.first);
-        const std::string name = c.FoodName(kv.first);
-        if (Row("food", name.c_str(), FoodSummary(kv.second).c_str(), kv.first == c.food, 54 * S)) {
-            g_editFood = kv.first;
-            Go(kFoodEdit);
-        }
-        if (has ? kv.first == c.food : kv.first == c.foods.begin()->first) FocusDefault();
+    std::vector<int> ids = c.FoodIds();
+    int from = -1, to = -1, open = 0;
+    const int n = (int)ids.size();
+    for (int i = 0; i < n; ++i) {
+        const int id = ids[i];
+        ImGui::PushID(id);
+        const bool pressed = Row("food", c.FoodName(id).c_str(), FoodSummary(c.foods.at(id)).c_str(), id == c.food, 54 * S);
+        int moveTo = -1;
+        if (ReorderRow(pressed, i, n, moveTo)) open = id;
+        if (moveTo >= 0) { from = i; to = moveTo; }
+        if (has ? id == c.food : i == 0) FocusDefault();
         ImGui::PopID();
     }
+    if (from >= 0) {
+        std::swap(ids[from], ids[to]);
+        c.foodOrder = ids;
+        m.reqSave = true;
+    }
+    if (open) {
+        g_editFood = open;
+        Go(kFoodEdit);
+    }
+    if (n > 1) ReorderHint();
     ImGui::Dummy(ImVec2(0, 8 * S));
     const bool newFood = PillButton("##newfood", "新建猫饭", ImGui::GetContentRegionAvail().x, 46 * S, kSecondary, kIcPlus);
     if (c.foods.empty()) FocusDefault();
@@ -1331,6 +1405,13 @@ std::string DebugCaptureWhy() { return g_capWhy; }
 
 void DebugSetSearch(const char* text) { std::snprintf(g_search, sizeof(g_search), "%s", text); }
 void DebugFocusName() { g_focusName = true; }
+bool DebugRowCenter(int i, float& x, float& y)
+{
+    if (i < 0 || i >= (int)g_rowRects.size()) return false;
+    x = g_rowRects[i].GetCenter().x;
+    y = g_rowRects[i].GetCenter().y;
+    return true;
+}
 std::string DebugNameWarn() { return g_nameWarn; }
 
 void OnOpen(Model& m)
@@ -1410,8 +1491,10 @@ void Draw(Model& m, float screenW, float screenH)
     // 不然同一下 B 又会被当成「返回上一页」
     const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || g_popupLastFrame;
     const bool typing = ImGui::GetIO().WantTextInput;
-    if (!popup && !typing && !capturing &&
-        (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+    const bool backKey = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    // 拖过位置的标记留到松开那一帧（松开时 Row 会报「点了」，要靠它认出来不算）
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left)) g_dragMoved = false;
+    if (!popup && !typing && !capturing && backKey) {
         if (Back(g_page) != g_page) Go(Back(g_page));
         else if (g_page != kHome) Go(kHome);
         else m.reqClose = true;
