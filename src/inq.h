@@ -22,7 +22,7 @@ struct State {
     volatile std::uint8_t resetOnly = 0;      // INQ+6  这一次只重置回据点，不接任务（快捷键给的）
     volatile std::uint8_t optWyvern = 0;      // INQ+7  普通地图用翼龙起始
     volatile std::uint32_t questId = 0;       // INQ+8  0 = 用上一次的任务
-    volatile std::int32_t food = 0;           // INQ+C  进任务时套用的猫饭（编号，0 = 不管）
+    volatile std::int32_t food = 0;           // INQ+C  进任务时套用的猫饭（编号，0 = 不管，kFoodCurrent = 当前猫饭）
     volatile std::int32_t equipLoadout = 0;   // INQ+10 待套用的装备套装 1..224
     volatile std::int32_t itemLoadout = 0;    // INQ+14 待套用的道具套装 1..80
     volatile std::uint32_t message = 0;       // INQ+50 提示位：1 装备套装无效 2 接任务失败

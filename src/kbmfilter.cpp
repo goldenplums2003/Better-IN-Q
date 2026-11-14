@@ -221,15 +221,18 @@ bool Install(std::string& info)
     }
     if (!g_orig.async || !g_orig.key) { info = di + "；user32 里找不到按键查询函数"; return false; }
     const std::uintptr_t exe = reinterpret_cast<std::uintptr_t>(::GetModuleHandleW(nullptr));
-    const struct { const char* name; void* fn; void* hk; } fns[] = {
-        {"GetAsyncKeyState", reinterpret_cast<void*>(g_orig.async), reinterpret_cast<void*>(HkGetAsyncKeyState)},
-        {"GetKeyState", reinterpret_cast<void*>(g_orig.key), reinterpret_cast<void*>(HkGetKeyState)},
+    // fn 是系统函数本身（g_orig 接到别的插件后面以后就不是了）
+    const struct { const char* name; void* fn; void* hk; void** orig; } fns[] = {
+        {"GetAsyncKeyState", reinterpret_cast<void*>(::GetProcAddress(u, "GetAsyncKeyState")),
+         reinterpret_cast<void*>(HkGetAsyncKeyState), reinterpret_cast<void**>(&g_orig.async)},
+        {"GetKeyState", reinterpret_cast<void*>(::GetProcAddress(u, "GetKeyState")),
+         reinterpret_cast<void*>(HkGetKeyState), reinterpret_cast<void**>(&g_orig.key)},
     };
     static int hits[2] = {};   // 累计：没装成会重试，前几次换掉的不会再被找到
     info = di;
     for (int i = 0; i < 2; ++i) {
         std::string where;
-        const int n = hook::ReplaceModulePointers(exe, fns[i].fn, fns[i].hk, &g_orig, &g_orig + 1, &where);
+        const int n = hits[i] ? 0 : hook::ReplaceChained(exe, fns[i].fn, fns[i].hk, fns[i].orig, &where);
         if (n) Log("kbmfilter: 换掉 %s处的 %s", where.c_str(), fns[i].name);
         hits[i] += n;
         info += std::string("，") + fns[i].name + " " + std::to_string(hits[i]) + " 处";

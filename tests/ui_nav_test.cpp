@@ -172,8 +172,11 @@ int main()
     Press(ImGuiKey_GamepadDpadLeft);
     CHECK(ui::DebugSidebarFocused() && ui::DebugSidebarFocusIndex() == 0 && ui::DebugPage() == 0,
           "再往左两次：进侧栏「任务」（第 %d 格）", ui::DebugSidebarFocusIndex());
+    ui::OnOpen(m);   // 先回到内容区（焦点不在侧栏），再去设置页：下面才是真的从设置页内容往左
+    for (int i = 0; i < 4; ++i) Frame();
     ui::DebugGo(6, 0);
     for (int i = 0; i < 4; ++i) Frame();
+    CHECK(!ui::DebugSidebarFocused() && ui::DebugPage() == 6, "去设置页：焦点在设置页内容里（%s）", PageName(ui::DebugPage()));
     for (int i = 0; i < 6; ++i) Press(ImGuiKey_GamepadDpadDown);
     g_sideTrace.clear();
     Press(ImGuiKey_GamepadDpadLeft);
@@ -183,6 +186,11 @@ int main()
         CHECK(clean && ui::DebugSidebarFocusIndex() == 3 && ui::DebugPage() == 6,
               "设置页中间往左：直接到侧栏「设置」（第 %d 格，%s）", ui::DebugSidebarFocusIndex(), PageName(ui::DebugPage()));
     }
+    // 焦点在侧栏「设置」时关掉面板，再打开：回到主页、焦点在内容（不是停在设置页的侧栏上）
+    ui::OnOpen(m);
+    for (int i = 0; i < 4; ++i) Frame();
+    CHECK(ui::DebugPage() == 0 && !ui::DebugSidebarFocused(), "侧栏里关的面板再打开：回到主页内容（%s，侧栏 %d）",
+          PageName(ui::DebugPage()), (int)ui::DebugSidebarFocused());
 
     // 换页时面板高度是渐变的
     {
@@ -633,6 +641,24 @@ int main()
         CHECK(!cfg.FindSet("要删的") && ui::DebugPage() == 2 && m.reqSave, "往右到「删除」按 A：删掉，回套装列表（%s）",
               PageName(ui::DebugPage()));
         m.reqSave = false;
+
+        // 删除确认开着时关了面板（不再画帧），再打开：弹窗要已经关了，B 键照常能用
+        LoadoutSet extra2;
+        extra2.name = "关面板时开着确认";
+        cfg.sets.push_back(extra2);
+        ui::DebugGo(3, (int)cfg.sets.size() - 1);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugOpenDelete();
+        for (int i = 0; i < 3; ++i) Frame();
+        CHECK(ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), "（又弹出删除确认）");
+        ui::OnOpen(m);   // 面板关了又开：回主页
+        for (int i = 0; i < 3; ++i) Frame();
+        CHECK(!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && ui::DebugPage() == 0, "重开面板：上次没关的确认卡片已经关掉");
+        ui::DebugGo(2, 0);
+        for (int i = 0; i < 3; ++i) Frame();
+        Press(ImGuiKey_GamepadFaceRight);
+        CHECK(ui::DebugPage() == 0, "B 键照常能用（套装列表按 B 回主页：%s）", PageName(ui::DebugPage()));
+        cfg.sets.pop_back();
     }
 
     // 「只重置回据点」快捷键：设置页第三行，能录

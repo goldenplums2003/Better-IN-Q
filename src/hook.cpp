@@ -1,6 +1,7 @@
 #include "hook.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -271,7 +272,7 @@ int ReplaceModulePointers(std::uintptr_t base, void* oldPtr, void* newPtr, const
             if (*slot != oldPtr) continue;
             if (skipLo && reinterpret_cast<const void*>(slot) >= skipLo && reinterpret_cast<const void*>(slot) < skipHi)
                 continue;
-            WriteMem(reinterpret_cast<std::uintptr_t>(slot), &newPtr, sizeof(newPtr));
+            if (!WriteMem(reinterpret_cast<std::uintptr_t>(slot), &newPtr, sizeof(newPtr))) continue;   // 没写进去不算
             if (where) {
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), "%.8s+%zx ", reinterpret_cast<const char*>(sec[k].Name), o);
@@ -297,6 +298,75 @@ bool TextRange(std::uintptr_t moduleBase, std::uintptr_t& begin, std::size_t& le
         }
     }
     return false;
+}
+
+namespace {
+
+std::mutex g_chainMx;
+std::vector<std::pair<void*, void*>> g_chain;   // (系统函数, 我们换成的函数)
+
+// 别的模块（插件）报出来的、它们换掉 api 用的函数
+std::vector<void*> ForeignHooksFor(void* api, void* ours)
+{
+    std::vector<void*> out;
+    HMODULE self = nullptr;
+    ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&ForeignHooksFor), &self);
+    HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, ::GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    typedef void* (*HookForFn)(void*);
+    for (BOOL ok = ::Module32FirstW(snap, &me); ok; ok = ::Module32NextW(snap, &me)) {
+        if (me.hModule == self) continue;
+        const HookForFn f = reinterpret_cast<HookForFn>(::GetProcAddress(me.hModule, "InputHookFor"));
+        void* h = f ? f(api) : nullptr;
+        if (h && h != ours && h != api) out.push_back(h);
+    }
+    ::CloseHandle(snap);
+    return out;
+}
+
+} // namespace
+
+int ReplaceChained(std::uintptr_t base, void* api, void* newPtr, void** orig, std::string* where)
+{
+    // 先登记：别的插件这时来问，也能接到我们后面
+    {
+        std::lock_guard<std::mutex> lk(g_chainMx);
+        g_chain.emplace_back(api, newPtr);
+    }
+    // 别的插件的钩子排前面：换到了它的，我们的「原函数」就是它（它再调系统的）。
+    // 系统函数本身的指针也换（有的格子它没换到），这些格子经过我们以后同样走它那一层
+    std::vector<void*> cands = ForeignHooksFor(api, newPtr);
+    const bool foreign = !cands.empty();
+    cands.push_back(api);
+    void* chosen = nullptr;
+    int total = 0;
+    for (void* c : cands) {
+        if (!chosen) *orig = c;   // 换之前就设好：换完的下一瞬间游戏就可能调进来
+        const int n = ReplaceModulePointers(base, c, newPtr, orig, orig + 1, where);
+        if (!n) continue;
+        total += n;
+        if (!chosen) chosen = c;
+    }
+    if (!chosen) {
+        *orig = api;   // 一处都没找到：「原函数」还是系统的，调到也不出错
+        std::lock_guard<std::mutex> lk(g_chainMx);
+        for (auto it = g_chain.begin(); it != g_chain.end(); ++it)
+            if (it->first == api && it->second == newPtr) { g_chain.erase(it); break; }
+        return 0;
+    }
+    if (where && foreign && chosen != api) *where += "（接在别的插件后面）";
+    return total;
+}
+
+void* ChainHookFor(void* api)
+{
+    std::lock_guard<std::mutex> lk(g_chainMx);
+    for (const auto& p : g_chain)
+        if (p.first == api) return p.second;
+    return nullptr;
 }
 
 } // namespace hook

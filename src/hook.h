@@ -84,4 +84,15 @@ int ReplaceModulePointers(std::uintptr_t moduleBase, void* oldPtr, void* newPtr,
                           const void* skipLo = nullptr, const void* skipHi = nullptr,
                           std::string* where = nullptr);
 
+
+// ---- 和别的插件串成一条链 ----
+// 游戏里 XInputGetState、SetCursorPos 这些指针，别的插件（比如 Better-IN-Q）可能已经换成了它自己的
+// 过滤函数，再按系统函数的地址就找不到了。约定：插件导出
+//     extern "C" void* InputHookFor(void* api)
+// 回答「api 在游戏里的指针，我换成了哪个函数」。换指针时先找 api 本身，找不到再找别的插件报出来的那个；
+// 换掉的是谁，我们的「原函数」就调谁：游戏 → 我们 → 它 → 系统，谁的面板开着谁拦。
+// *orig 在换之前就设好（换完的下一瞬间游戏就可能调进来）。返回换了几处。
+int ReplaceChained(std::uintptr_t moduleBase, void* api, void* newPtr, void** orig, std::string* where = nullptr);
+void* ChainHookFor(void* api);   // 给 InputHookFor 用：我们把 api 换成了谁（没换过 = nullptr）
+
 } // namespace hook

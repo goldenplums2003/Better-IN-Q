@@ -41,6 +41,8 @@ bool ReadAll(const std::wstring& path, std::string& out)
 }
 
 bool Bool(const std::string& v) { return v == "1" || v == "true" || v == "on" || v == "yes"; }
+int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+constexpr int kMaxFoodSkill = 56;   // 猫饭技能编号 0~56（见 foodskills.inc），-1 = 无
 
 } // namespace
 
@@ -66,10 +68,11 @@ std::string Render(const Config& c)
     o += kv("Reset", num(c.reset), "1 = 重置后回据点再接（慢，完全走正规流程）");
     o += kv("AcceptOnly", num(c.acceptOnly), "1 = 只接任务，不出发");
     o += kv("WyvernStart", num(c.wyvern), "1 = 普通地图用翼龙起始");
+    // 套装名在面板里打不进 ; 和 #，这一行可以照旧带行尾注释（老版本写的配置也是这样）
     o += kv("ActiveSet", c.activeSet, "重开时套用的全套（下面 [Set.名字]），空 = 不套");
     o += kv("Food", num(c.food), "每次进任务都吃的猫饭（下面 [Food.编号]），0 = 不管");
     o += kv("QuickBlackout", num(c.quickBlackout), "缩短转场黑屏");
-    o += kv("QuickReset", num(c.quickReset), "快速重置（下次开游戏生效）");
+    o += kv("QuickReset", num(c.quickReset), "快速重置（关掉重开会慢一点）");
     o += kv("FoodEveryQuest", num(c.foodEveryQuest), "1 = 自己正常接任务也换成插件的猫饭，0 = 只有插件重开才换");
     o += kv("PanelOpacity", num(c.panelOpacity), "面板不透明度 30~100");
     if (!c.foods.empty()) {
@@ -77,6 +80,7 @@ std::string Render(const Config& c)
         for (int id : c.FoodIds()) order += (order.empty() ? "" : ",") + num(id);
         o += kv("FoodOrder", order, "猫饭在面板里的顺序");
     }
+    if (c.logFileLoads) o += kv("LogFileLoads", num(c.logFileLoads), "1 = 把游戏读的音效文件写进日志（排查用）");
     if (c.debug) o += kv("Debug", num(c.debug), "");
     o += "\r\n[Hotkeys]\r\n";
     o += "; 手柄：A B X Y LB RB LT RT LS RS Up Down Left Right View Menu\r\n";
@@ -143,7 +147,17 @@ bool SaveConfig(const std::wstring& path, const Config& cfg)
 bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
 {
     std::string txt;
-    if (!ReadAll(path, txt)) {
+    bool read = ReadAll(path, txt);
+    // 文件在但读不了（杀毒、同步盘、编辑器正占着）：等一等再读，别当成没有
+    for (int i = 0; i < 10 && !read && ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; ++i) {
+        ::Sleep(200);
+        read = ReadAll(path, txt);
+    }
+    if (!read) {
+        if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            err = "配置文件在，但一直读不了（被别的程序占着？）";
+            return false;
+        }
         SaveDefaultConfig(path);
         if (!ReadAll(path, txt)) { err = "读不到也建不了配置文件"; return false; }
     }
@@ -166,15 +180,21 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
                 cfg.sets.push_back(LoadoutSet());
                 curSet = &cfg.sets.back();
                 curSet->name = Trim(sec.substr(4));
+                // 手改出来的重名：后面的加编号（面板按名字区分每一行，重名会串）
+                const std::string base = curSet->name;
+                for (int k = 2; cfg.FindSet(curSet->name) != curSet; ++k) curSet->name = base + " (" + std::to_string(k) + ")";
             } else if (sec.compare(0, 5, "Food.") == 0) {
-                curFood = &cfg.foods[std::atoi(sec.c_str() + 5)];
+                const int id = std::atoi(sec.c_str() + 5);
+                curFood = id > 0 ? &cfg.foods[id] : nullptr;   // 0 在别处表示「不吃」，手改出来的 0 号不认
             }
             continue;
         }
         const std::size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string k = Trim(line.substr(0, eq));
-        const std::string v = Trim(StripComment(line.substr(eq + 1)));
+        // 套装名、猫饭名是游戏里或面板里起的名字，可能带 # 或 ;：这几项不认行尾注释（存的时候也不往后面写注释）
+        const bool nameKey = (curSet && (k == "Equip" || k == "Item")) || (curFood && k == "Name");
+        const std::string v = nameKey ? Trim(line.substr(eq + 1)) : Trim(StripComment(line.substr(eq + 1)));
         const int n = std::atoi(v.c_str());
         if (sec == "General") {
             if (k == "QuestID") cfg.questId = n;
@@ -182,9 +202,10 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
             else if (k == "AcceptOnly") cfg.acceptOnly = Bool(v);
             else if (k == "WyvernStart") cfg.wyvern = Bool(v);
             else if (k == "ActiveSet") cfg.activeSet = v;
-            else if (k == "Food") cfg.food = n;
+            else if (k == "Food") cfg.food = n < 0 ? 0 : n;   // 「当前猫饭」只在全套里选，全局不认
             else if (k == "QuickBlackout") cfg.quickBlackout = Bool(v);
             else if (k == "QuickReset") cfg.quickReset = Bool(v);
+            else if (k == "LogFileLoads") cfg.logFileLoads = Bool(v);
             else if (k == "FoodEveryQuest") cfg.foodEveryQuest = Bool(v);
             else if (k == "PanelOpacity") cfg.panelOpacity = n < 30 ? 30 : (n > 100 ? 100 : n);
             else if (k == "Debug") cfg.debug = n;
@@ -205,22 +226,23 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
             if (k == "Equip") curSet->equip = v;
             else if (k == "Item") curSet->item = v;
             else if (k == "LinkRadial") curSet->linkRadial = Bool(v);
-            else if (k == "Food") curSet->food = n;
+            else if (k == "Food") curSet->food = n < kFoodCurrent ? 0 : n;
             else if (k == "Quest") curSet->quest = n;
         } else if (curFood) {
             if (k == "Name") curFood->name = v;
-            else if (k == "HP") curFood->hp = n;
-            else if (k == "Stamina") curFood->stamina = n;
-            else if (k == "Attack") curFood->attack = n;
-            else if (k == "Defense") curFood->defense = n;
-            else if (k == "ElemRes") curFood->elemRes = n;
+            // 范围外的值游戏拿去查表会越界：夹到面板能选的范围
+            else if (k == "HP") curFood->hp = Clamp(n, 0, 5);
+            else if (k == "Stamina") curFood->stamina = Clamp(n, 0, 2);
+            else if (k == "Attack") curFood->attack = Clamp(n, 0, 3);
+            else if (k == "Defense") curFood->defense = Clamp(n, 0, 3);
+            else if (k == "ElemRes") curFood->elemRes = Clamp(n, 0, 3);
             else if (k == "Skills") {
                 int i = 0;
                 for (std::size_t p = 0; p <= v.size() && i < 3;) {
                     std::size_t c = v.find(',', p);
                     if (c == std::string::npos) c = v.size();
                     const std::string t = Trim(v.substr(p, c - p));
-                    if (!t.empty()) curFood->skill[i++] = std::atoi(t.c_str());
+                    if (!t.empty()) curFood->skill[i++] = Clamp(std::atoi(t.c_str()), -1, kMaxFoodSkill);
                     p = c + 1;
                 }
             }

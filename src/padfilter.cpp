@@ -19,7 +19,8 @@ typedef DWORD(WINAPI* GetStateFn)(DWORD, XINPUT_STATE*);
 // 进程里可能同时有好几个 XInput 库（游戏用 xinput9_1_0，我们自己的快捷键和 ImGui 加载的
 // 是 xinput1_4），各有各的 XInputGetState。每找到一个就占一个槽，钩子按槽调回对应的原函数。
 constexpr int kSlots = 12;
-GetStateFn g_orig[kSlots] = {};
+GetStateFn g_orig[kSlots] = {};   // 钩子往下调谁（系统函数，或者别的插件的钩子）
+GetStateFn g_api[kSlots] = {};    // 这一格对应哪个系统函数
 int g_slots = 0;
 std::atomic<bool> g_block{false};
 std::atomic<unsigned short> g_chord{0};
@@ -55,6 +56,7 @@ void Filter(DWORD i, XINPUT_STATE* s)
         if (!g_block.load() && !AnyDown(g)) {
             p.muted = false;
             p.st = Pad::kIdle;
+            p.pulse = 0;   // 开面板前那一下还没补发完的点按作废：不然关了面板会冒出来，开地图 / 菜单
         } else {
             std::memset(&g, 0, sizeof(g));
             return;
@@ -199,19 +201,18 @@ bool Install(std::string& info)
             GetStateFn fn = reinterpret_cast<GetStateFn>(fns[k]);
             if (!fn || g_slots >= kSlots) continue;
             bool dup = false;
-            for (int s = 0; s < g_slots; ++s) dup |= (g_orig[s] == fn);
+            for (int s = 0; s < g_slots; ++s) dup |= (g_api[s] == fn);
             if (dup) continue;
             const int slot = g_slots;
-            g_orig[slot] = fn;   // 先填好原函数再换指针：换完的下一瞬间游戏就可能调进来
             char what[64];
             std::snprintf(what, sizeof(what), "%ls!%s", d, k == 0 ? "XInputGetState" : "#100");
             // 存原函数的表本身不能换，否则钩子调「原函数」就是调自己。游戏里不会碰到
             //（这张表在我们的 DLL 里，扫的是游戏 exe），过滤器被编进被扫的模块时（测试）会。
             std::string where;
-            const int hit = hook::ReplaceModulePointers(reinterpret_cast<std::uintptr_t>(::GetModuleHandleW(nullptr)),
-                                                        reinterpret_cast<void*>(fn), reinterpret_cast<void*>(kHooks[slot]),
-                                                        g_orig, g_orig + kSlots, &where);
-            if (hit) { Log("padfilter: 换掉 %s处的 %s", where.c_str(), what); ++g_slots; n += hit; }
+            const int hit = hook::ReplaceChained(reinterpret_cast<std::uintptr_t>(::GetModuleHandleW(nullptr)),
+                                                 reinterpret_cast<void*>(fn), reinterpret_cast<void*>(kHooks[slot]),
+                                                 reinterpret_cast<void**>(&g_orig[slot]), &where);
+            if (hit) { Log("padfilter: 换掉 %s处的 %s", where.c_str(), what); g_api[slot] = fn; ++g_slots; n += hit; }
             else g_orig[slot] = nullptr;
         }
     }

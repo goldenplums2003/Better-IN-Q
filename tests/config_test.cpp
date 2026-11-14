@@ -177,6 +177,38 @@ int main()
         ::DeleteFileW(p.c_str());
     }
 
+    // 当前猫饭：全套的猫饭一栏里选，配置里是 -1；记住玩家自己吃的那份
+    {
+        Config c;
+        c.food = kFoodCurrent;
+        LoadoutSet s;
+        s.name = "练习";
+        s.food = kFoodCurrent;
+        c.sets.push_back(s);
+        c.foods[1].hp = 5;
+        const std::wstring p = L"out\\config_test_cur.ini";
+        SaveConfig(p, c);
+        Config r;
+        std::string err;
+        LoadConfig(p, r, err);
+        CHECK(r.food == 0 && r.sets.size() == 1 && r.sets[0].food == kFoodCurrent,
+              "「当前猫饭」只在全套里选：全套的存了能读回来，全局的不认（%d）", r.food);
+        CHECK(r.FoodName(kFoodCurrent) == "当前猫饭" && r.FoodName(1) == "猫饭 1", "显示的名字：%s", r.FoodName(kFoodCurrent).c_str());
+        ::DeleteFileW(p.c_str());
+
+        MealMemory mm;
+        const int none[8] = {0, 0, 0, 0, 0, -1, -1, -1}, zero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        const int ate[8] = {5, 2, 3, 0, 0, 32, -1, 39}, ate2[8] = {3, 1, 0, 1, 0, -1, -1, -1};
+        const int junk[8] = {5, 2, 3, 0, 0, 32, 9000, 39}, junk2[8] = {-7, 2, 3, 0, 0, 32, 9, 39};
+        CHECK(!mm.Observe(none, false) && !mm.Observe(zero, false) && !mm.has, "没吃饭（技能 -1 或整块是 0）：不记");
+        CHECK(!mm.Observe(junk, false) && !mm.Observe(junk2, false) && !mm.has, "不像猫饭的数（越界）：不记");
+        CHECK(!mm.Observe(ate, true) && !mm.has, "读盘中：不记（那是插件自己正在写的）");
+        CHECK(mm.Observe(ate, false) && mm.has && mm.v[0] == 5 && mm.v[5] == 32 && mm.v[6] == -1, "吃了一顿：记下");
+        CHECK(!mm.Observe(ate, false), "还是那一顿：不重复记");
+        CHECK(!mm.Observe(none, false) && mm.has && mm.v[0] == 5, "重开后游戏把饭清掉了：记着的还是刚才那份");
+        CHECK(mm.Observe(ate2, false) && mm.v[0] == 3 && mm.v[3] == 1 && mm.v[5] == -1, "又吃了另一顿：换成新的");
+    }
+
     // 猫饭顺序：存了能读回来；顺序表里没有的排在后面，删掉的不出现
     {
         Config c;
@@ -218,6 +250,34 @@ int main()
         CHECK(r.hkResetOnly == "LB+RB+View | Ctrl+F5", "只重置回据点：%s", r.hkResetOnly.c_str());
         CHECK(r.foods[2].name == "黑龙饭" && r.foods[2].hp == 5, "猫饭名字：%s", r.foods[2].name.c_str());
         CHECK(r.FoodName(3) == "猫饭 3" && r.FoodName(2) == "黑龙饭", "没起名字的显示「猫饭 编号」");
+        ::DeleteFileW(p.c_str());
+    }
+
+    std::printf("== 名字里的 # ;、重名、越界的猫饭\n");
+    {
+        Config c;
+        LoadoutSet s;
+        s.name = "大剑";
+        s.equip = "#1 Rage";                      // 游戏里起的名字带 #
+        s.item = "大剑 ; 爆破";
+        c.sets.push_back(s);
+        c.foods[1].name = "饭 #2";
+        const std::wstring p = L"out\\config_test_names.ini";
+        CHECK(SaveConfig(p, c), "存");
+        Config r;
+        std::string err;
+        LoadConfig(p, r, err);
+        CHECK(r.sets.size() == 1 && r.sets[0].equip == "#1 Rage" && r.sets[0].item == "大剑 ; 爆破",
+              "套装名里的 # 和 ; 不当注释（%s / %s）", r.sets.empty() ? "" : r.sets[0].equip.c_str(),
+              r.sets.empty() ? "" : r.sets[0].item.c_str());
+        CHECK(r.foods[1].name == "饭 #2", "猫饭名里的 #：%s", r.foods[1].name.c_str());
+
+        WriteFile8(p, "[Set.米拉]\r\nEquip=1\r\n[Set.米拉]\r\nEquip=2\r\n[Food.1]\r\nHP=50\r\nStamina=-3\r\nAttack=9\r\nSkills=99,-5,12\r\n");
+        LoadConfig(p, r, err);
+        CHECK(r.sets.size() == 2 && r.sets[0].name == "米拉" && r.sets[1].name == "米拉 (2)" && r.FindSet("米拉 (2)") == &r.sets[1],
+              "手改出来的重名：后一个改成「米拉 (2)」");
+        CHECK(r.foods[1].hp == 5 && r.foods[1].stamina == 0 && r.foods[1].attack == 3, "越界的数值夹回范围（HP 50 → 5）");
+        CHECK(r.foods[1].skill[0] == 56 && r.foods[1].skill[1] == -1 && r.foods[1].skill[2] == 12, "技能编号夹到 -1~56");
         ::DeleteFileW(p.c_str());
     }
 

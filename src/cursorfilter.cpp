@@ -83,23 +83,28 @@ bool Install(std::string& info)
     if (g_installed) return true;
     HMODULE u = ::GetModuleHandleW(L"user32.dll");
     if (!u) { info = "user32 还没加载"; return false; }
-    // 先填好原函数再换指针：换完的下一瞬间游戏就可能调进来
-    g_orig.setPos = reinterpret_cast<SetPosFn>(::GetProcAddress(u, "SetCursorPos"));
-    g_orig.getPos = reinterpret_cast<GetPosFn>(::GetProcAddress(u, "GetCursorPos"));
-    g_orig.clip = reinterpret_cast<ClipFn>(::GetProcAddress(u, "ClipCursor"));
-    if (!g_orig.setPos || !g_orig.getPos || !g_orig.clip) { info = "user32 里找不到光标函数"; return false; }
+    void* const api[3] = {reinterpret_cast<void*>(::GetProcAddress(u, "SetCursorPos")),
+                          reinterpret_cast<void*>(::GetProcAddress(u, "GetCursorPos")),
+                          reinterpret_cast<void*>(::GetProcAddress(u, "ClipCursor"))};
+    if (!api[0] || !api[1] || !api[2]) { info = "user32 里找不到光标函数"; return false; }
+    // 先填好原函数再换指针：换完的下一瞬间游戏就可能调进来（重试时别把已经接上的链冲掉）
+    if (!g_orig.setPos) {
+        g_orig.setPos = reinterpret_cast<SetPosFn>(api[0]);
+        g_orig.getPos = reinterpret_cast<GetPosFn>(api[1]);
+        g_orig.clip = reinterpret_cast<ClipFn>(api[2]);
+    }
 
     const std::uintptr_t exe = reinterpret_cast<std::uintptr_t>(::GetModuleHandleW(nullptr));
-    const struct { const char* name; void* fn; void* hk; } fns[] = {
-        {"SetCursorPos", reinterpret_cast<void*>(g_orig.setPos), reinterpret_cast<void*>(HkSetCursorPos)},
-        {"GetCursorPos", reinterpret_cast<void*>(g_orig.getPos), reinterpret_cast<void*>(HkGetCursorPos)},
-        {"ClipCursor", reinterpret_cast<void*>(g_orig.clip), reinterpret_cast<void*>(HkClipCursor)},
+    const struct { const char* name; void* fn; void* hk; void** orig; } fns[] = {
+        {"SetCursorPos", api[0], reinterpret_cast<void*>(HkSetCursorPos), reinterpret_cast<void**>(&g_orig.setPos)},
+        {"GetCursorPos", api[1], reinterpret_cast<void*>(HkGetCursorPos), reinterpret_cast<void**>(&g_orig.getPos)},
+        {"ClipCursor", api[2], reinterpret_cast<void*>(HkClipCursor), reinterpret_cast<void**>(&g_orig.clip)},
     };
     static int hits[3] = {};   // 累计：没装成会重试，前几次换掉的不会再被找到
     info.clear();
     for (int i = 0; i < 3; ++i) {
         std::string where;
-        const int n = hook::ReplaceModulePointers(exe, fns[i].fn, fns[i].hk, &g_orig, &g_orig + 1, &where);
+        const int n = hits[i] ? 0 : hook::ReplaceChained(exe, fns[i].fn, fns[i].hk, fns[i].orig, &where);
         if (n) Log("cursorfilter: 换掉 %s处的 %s", where.c_str(), fns[i].name);
         hits[i] += n;
         info += std::string(i ? "，" : "") + fns[i].name + " " + std::to_string(hits[i]) + " 处";

@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <deque>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 namespace {
 std::wstring g_logPath;
@@ -101,4 +103,22 @@ void FlushChat()
         std::snprintf(buf, sizeof(buf), "%s", m.c_str());
         fn(mgr, buf, 0.0f, -1, false);
     }
+}
+
+// ImGui 的断言失败（见 imgui_user.h）：同一处可能每帧都失败，每处只记一次，最多记 16 处
+void ImGuiAssertFailed(const char* expr, const char* file, int line)
+{
+    static std::mutex mx;
+    static std::vector<std::pair<std::string, int>> seen;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        if (seen.size() >= 16) return;
+        for (const auto& s : seen)
+            if (s.second == line && s.first == file) return;
+        seen.emplace_back(file, line);
+    }
+    const char* base = file;
+    for (const char* p = file; *p; ++p)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    Log("imgui: 断言失败（跳过了，接着跑）%s:%d  %s", base, line, expr);
 }

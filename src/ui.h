@@ -37,7 +37,11 @@ struct Model {
     unsigned padHeld = 0;                 // 手柄（XINPUT_GAMEPAD_* 位 + kPadLT/kPadRT，见 input.h）
     std::vector<int> keysHeld;            // 键盘（只在录快捷键时填）
     bool capturing = false;               // 面板正在录快捷键：主循环别把按键当快捷键触发
-    bool wantIme = false;                 // 正在打名字：要用输入法（打中文）。别的时候面板里不挂输入法
+    bool wantIme = false;                 // 正在打名字 / 搜任务：要用输入法（打中文）。别的时候面板里不挂输入法
+    // 打名字时输入法正在打的拼音和当前页的候选词（每帧由外面填），画在名字框下面
+    std::string imeComp;
+    std::vector<std::string> imeCands;
+    int imeSel = -1;
 };
 
 // ImGui 上下文建好后调一次。scale = 屏幕高度 / 1080。

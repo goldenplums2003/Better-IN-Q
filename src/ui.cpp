@@ -68,6 +68,8 @@ bool g_sideFocusedLast = false;
 Page g_questFrom = kHome;   // 从哪一页进的「换任务」（返回时回那里）
 const char* const kNone = "—";   // 「不额外选择」：套装编辑页下拉的第一项，以及没选时显示的值
 bool g_popupLastFrame = false;   // 上一帧有没有开着的弹窗（下拉选项、删除确认）
+// 面板关掉时开着的弹窗不会自己关（ImGui 只在每帧里处理），重开后看不见却挡着鼠标和 B 键
+bool g_closePopups = false;
 ImGuiID g_sideCurId = 0;    // 侧栏里当前页那一格（十字键从内容区往左就落到它）
 int g_sideFocusIdx = -1;    // 这一帧焦点在侧栏第几格（测试用）
 float g_animHc = 0;         // 内容区高度的动画值（0 = 下一帧直接到位）
@@ -112,6 +114,50 @@ struct NameEdit {
     bool committed = false;   // 刚打完（回车、点了别处），而且改过
     std::string text;         // 框里的字，去掉首尾空格
 };
+// 输入法正在打的拼音和候选词，画在名字框正下方（输入法自己的候选窗口在游戏里出不来）
+void ImeStrip(const Model& m, ImVec2 fieldMin, ImVec2 fieldMax)
+{
+    auto width = [](const std::string& s) { return fReg->CalcTextSizeA(szBody, FLT_MAX, 0.0f, s.c_str()).x; };
+    const float padX = 12 * S, padY = 8 * S, gap = 18 * S, numGap = 5 * S, lineH = szBody + 6 * S;
+    // 和名字框一样宽，候选一行放不下就换行（不伸到面板外面去）
+    const float inner = std::max(fieldMax.x - fieldMin.x - padX * 2, 120 * S);
+    struct Cell { std::string num; float numW, wordW, x; int row; };
+    std::vector<Cell> cells;
+    float x = 0, used = 0;
+    int row = 0;
+    for (std::size_t i = 0; i < m.imeCands.size(); ++i) {
+        Cell c{std::to_string(i + 1), 0, 0, 0, 0};
+        c.numW = width(c.num);
+        c.wordW = width(m.imeCands[i]);
+        const float cw = c.numW + numGap + c.wordW;
+        if (x > 0 && x + cw > inner) { ++row; x = 0; }
+        c.x = x;
+        c.row = row;
+        x += cw + gap;
+        used = std::max(used, c.x + cw);
+        cells.push_back(c);
+    }
+    const float compW = m.imeComp.empty() ? 0 : width(m.imeComp);
+    const int lines = (compW > 0 ? 1 : 0) + (cells.empty() ? 0 : row + 1);
+    if (!lines) return;
+    const float w = std::max(compW, used) + padX * 2, h = lines * lineH + padY * 2 - 6 * S;
+    const ImVec2 a(fieldMin.x, fieldMax.y + 6 * S);
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), IM_COL32(24, 22, 18, 248), 10 * S);
+    dl->AddRect(a, ImVec2(a.x + w, a.y + h), IM_COL32(226, 194, 122, 110), 10 * S, 0, 1.0f * S);
+    float y = a.y + padY;
+    if (compW > 0) {
+        dl->AddText(fReg, szBody, ImVec2(a.x + padX, y), kGold, m.imeComp.c_str());
+        y += lineH;
+    }
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const Cell& c = cells[i];
+        const ImVec2 p(a.x + padX + c.x, y + c.row * lineH);
+        dl->AddText(fReg, szBody, p, kMuted, c.num.c_str());
+        dl->AddText(fReg, szBody, ImVec2(p.x + c.numW + numGap, p.y), (int)i == m.imeSel ? kGold : kText, m.imeCands[i].c_str());
+    }
+}
+
 NameEdit NameField(Model& m, const char* hint)
 {
     NameEdit r;
@@ -128,6 +174,7 @@ NameEdit NameField(Model& m, const char* hint)
     r.active = ImGui::IsItemActive();
     r.committed = ImGui::IsItemDeactivatedAfterEdit();
     if (r.active) m.wantIme = true;
+    if (r.active) ImeStrip(m, ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
     ImGui::PopFont();
     ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 46 * S));
     ImGui::Dummy(ImVec2(0, 0));
@@ -599,6 +646,12 @@ void PageQuests(Model& m)
     ImGui::SetNextItemWidth(-1);
     ImGui::PushFont(fReg, szBody);
     ImGui::InputTextWithHint("##search", "拼音、首字母或 ID，比如 heilong、hl", g_search, sizeof(g_search));
+    // 搜索框也挂输入法（能打中文搜任务名）。正在打、还没选词的拼音直接参与搜索：不切英文也照样按拼音筛
+    const bool searchActive = ImGui::IsItemActive();
+    if (searchActive) {
+        m.wantIme = true;
+        ImeStrip(m, ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+    }
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, 4 * S));
 
@@ -617,14 +670,14 @@ void PageQuests(Model& m)
             if (tq->group >= 0 && tq->group < gn) g_groupOpen[tq->group] = true;
     }
 
-    const std::string needle = g_search;
+    const std::string needle = std::string(g_search) + (searchActive ? m.imeComp : std::string());
     const bool searching = !needle.empty();
-    // 全局任务可以是 0 =「当前任务」（重开刚打完 / 正在打的那个）。全局和套装都能选「无」：
-    // 按重开键不重开，原地套用装备、道具、猫饭。搜索时这两行和搜的字无关，不列
-    const bool zeroRow = !forSet && !searching;
+    // 0：全局的是「当前任务」（重开刚打完 / 正在打的那个），套装的是「跟随全局」（不单独指定，选过别的也能改回来）。
+    // 全局和套装都能选「无」：按重开键不重开，原地套用装备、道具、猫饭。搜索时这两行和搜的字无关，不列
+    const bool zeroRow = !searching;
     const bool noneRow = !searching;
     if (zeroRow) {
-        if (Row("q0", "当前任务", nullptr, target == 0)) pick(0);
+        if (Row("q0", forSet ? "跟随全局" : "当前任务", forSet ? "不单独指定，用全局的任务" : nullptr, target == 0)) pick(0);
         if (target == 0) FocusDefault();
         if (target == 0 && g_scrollToSel > 0) { ImGui::SetScrollHereY(0.3f); --g_scrollToSel; }
     }
@@ -860,35 +913,72 @@ void PageSetEdit(Model& m)
         }
     }
 
-    // 装备
+    // 装备。游戏里没起名字的套装：显示「装备套装 n」，存编号（存显示的字就再也认不出来了）
+    auto isNum = [](const std::string& v) { return !v.empty() && v.find_first_not_of("0123456789") == std::string::npos; };
+    // 游戏里的名字和存的名字是不是同一个（存的读配置时去掉了首尾空格；套用时也这样认，见 inq.cpp 的 SameName）
+    auto sameName = [](std::string a, const std::string& b) {
+        while (!a.empty() && (a.back() == ' ' || a.back() == '\t')) a.pop_back();
+        std::size_t i = 0;
+        while (i < a.size() && (a[i] == ' ' || a[i] == '\t')) ++i;
+        return !b.empty() && a.compare(i, std::string::npos, b) == 0;
+    };
+    // 游戏里有同名的套装：存名字的话只认得第一个，选中的是哪个就存哪个的编号
+    auto dup = [](const std::vector<LoadoutName>& v, const std::string& n) {
+        int k = 0;
+        for (const auto& x : v) k += x.name == n;
+        return k > 1;
+    };
+    // 存的是编号：显示游戏里那一格的名字（没起名字的显示「xx套装 n」）
+    auto shown = [&](const std::string& v, const std::vector<LoadoutName>& names, const char* prefix) -> std::string {
+        if (v.empty()) return kNone;
+        if (!isNum(v)) return v;
+        for (const auto& x : names)
+            if (std::to_string(x.number) == v && !x.name.empty()) return x.name;
+        return prefix + v;
+    };
     std::vector<std::string> equips = {kNone};
     int curE = 0;
     for (const auto& e : m.equipNames) {
-        equips.push_back(e.name);
-        if (e.name == s.equip) curE = (int)equips.size() - 1;
+        equips.push_back(e.name.empty() ? "装备套装 " + std::to_string(e.number) : e.name);
+        if (!curE && (isNum(s.equip) ? std::to_string(e.number) == s.equip : sameName(e.name, s.equip)))
+            curE = (int)equips.size() - 1;
     }
-    if (ValueRow("##eq", "装备套装", s.equip.empty() ? kNone : s.equip.c_str())) ImGui::OpenPopup("pick_eq");
+    const std::string eqShown = shown(s.equip, m.equipNames, "装备套装 ");
+    if (ValueRow("##eq", "装备套装", eqShown.c_str())) ImGui::OpenPopup("pick_eq");
     FocusDefault();
     int p = PickPopup("pick_eq", equips, curE);
-    if (p >= 0) { s.equip = p == 0 ? std::string() : equips[p]; m.reqSave = true; }
+    if (p >= 0) {
+        const LoadoutName* e = p == 0 ? nullptr : &m.equipNames[p - 1];
+        // 没起名字、或者名字全是数字（会被当成编号）的：存编号
+        s.equip = !e ? std::string()
+                     : ((e->name.empty() || isNum(e->name) || dup(m.equipNames, e->name)) ? std::to_string(e->number) : e->name);
+        m.reqSave = true;
+    }
 
-    // 道具（名字可能重复，选中时存名字；游戏里只认第一个同名的）
+    // 道具：选中时存名字（玩家在游戏里排过序也认得）。没起名字的、和别的同名的存显示编号
     std::vector<std::string> items = {kNone};
     int curI = 0;
     for (const auto& it : m.itemNames) {
-        items.push_back(std::to_string(it.number) + "  " + it.name);
-        if (it.name == s.item || std::to_string(it.number) == s.item) curI = (int)items.size() - 1;
+        items.push_back(std::to_string(it.number) + "  " + (it.name.empty() ? "道具套装 " + std::to_string(it.number) : it.name));
+        if (!curI && (isNum(s.item) ? std::to_string(it.number) == s.item : sameName(it.name, s.item)))
+            curI = (int)items.size() - 1;
     }
-    if (ValueRow("##it", "道具套装", s.item.empty() ? kNone : s.item.c_str())) ImGui::OpenPopup("pick_it");
+    const std::string itShown = shown(s.item, m.itemNames, "道具套装 ");
+    if (ValueRow("##it", "道具套装", itShown.c_str())) ImGui::OpenPopup("pick_it");
     p = PickPopup("pick_it", items, curI);
-    if (p >= 0) { s.item = p == 0 ? std::string() : m.itemNames[p - 1].name; m.reqSave = true; }
+    if (p >= 0) {
+        const LoadoutName* it = p == 0 ? nullptr : &m.itemNames[p - 1];
+        s.item = !it ? std::string()
+                     : ((it->name.empty() || isNum(it->name) || dup(m.itemNames, it->name)) ? std::to_string(it->number) : it->name);
+        m.reqSave = true;
+    }
 
     if (ToggleRow("##lr", "联动快捷栏", nullptr, &s.linkRadial)) m.reqSave = true;
 
     // 猫饭
-    std::vector<std::string> foods = {kNone};
-    std::vector<int> foodIds = {0};
-    int curF = 0;
+    std::vector<std::string> foods = {kNone, c.FoodName(kFoodCurrent)};
+    std::vector<int> foodIds = {0, kFoodCurrent};
+    int curF = s.food == kFoodCurrent ? 1 : 0;
     for (int id : c.FoodIds()) {
         foods.push_back(c.FoodName(id));
         foodIds.push_back(id);
@@ -1046,6 +1136,7 @@ void PageFoodEdit(Model& m)
 struct Capture {
     std::string* spec = nullptr;   // 录完写进哪个快捷键（nullptr = 没在录）
     bool pad = false;              // 录手柄那一组还是键盘那一组
+    bool required = false;         // 不能清空（打开面板：清空了就再也打不开）
     bool armed = false;            // 开始录之前按着的键（比如刚按下去的 A）都松开了
     unsigned padAcc = 0;           // 这一轮按过的键，全松开时认这一组
     std::vector<int> keyAcc;
@@ -1062,11 +1153,12 @@ void EndCapture()
     g_capWhy.clear();
 }
 
-// 快捷键写法拆成手柄那组和键盘那组（各取第一组）
-void SplitSpec(const std::string& spec, std::string& pad, std::string& key)
+// 快捷键写法拆成手柄那组和键盘那组（面板上各显示第一组）。ini 里手写的更多组放进 rest，写回时原样带上
+void SplitSpec(const std::string& spec, std::string& pad, std::string& key, std::string* rest = nullptr)
 {
     pad.clear();
     key.clear();
+    if (rest) rest->clear();
     for (std::size_t p = 0; p <= spec.size();) {
         std::size_t bar = spec.find('|', p);
         if (bar == std::string::npos) bar = spec.size();
@@ -1077,23 +1169,32 @@ void SplitSpec(const std::string& spec, std::string& pad, std::string& key)
         if (h.alts.size() != 1) continue;
         std::string& to = h.alts[0].keys.empty() ? pad : key;
         if (to.empty()) to = alt;
+        else if (rest) *rest += (rest->empty() ? "" : " | ") + alt;
     }
 }
 
-std::string JoinSpec(const std::string& pad, const std::string& key)
+std::string JoinSpec(const std::string& pad, const std::string& key, const std::string& rest = std::string())
 {
-    if (pad.empty()) return key;
-    if (key.empty()) return pad;
-    return pad + " | " + key;
+    std::string out;
+    for (const std::string* s : {&pad, &key, &rest})
+        if (!s->empty()) out += (out.empty() ? "" : " | ") + *s;
+    return out;
 }
 
 // 把录到的（或清空的）一组写回快捷键
 void SetCapturedPart(Model& m, const std::string& combo)
 {
-    std::string pad, key;
-    SplitSpec(*g_cap.spec, pad, key);
+    std::string pad, key, rest;
+    SplitSpec(*g_cap.spec, pad, key, &rest);
     (g_cap.pad ? pad : key) = combo;
-    *g_cap.spec = JoinSpec(pad, key);
+    const std::string next = JoinSpec(pad, key, rest);
+    if (next.empty() && g_cap.required) {   // 最后一个也清掉，就再也打不开面板了：不让清，接着录
+        g_capWhy = "打开面板至少要留一个键";
+        g_cap.padAcc = 0;
+        g_cap.keyAcc.clear();
+        return;
+    }
+    *g_cap.spec = next;
     m.reqSave = true;
     EndCapture();
 }
@@ -1146,10 +1247,10 @@ void UpdateCapture(Model& m)
 constexpr float kHkLabelW = 0.30f;   // 快捷键行左边标签占的宽度比例
 
 // 一格：某个快捷键的手柄组或键盘组。按 A / 点一下开始录（录的时候再点一下取消）
-void HotkeyChip(const char* id, std::string& spec, bool pad, float w, float h, Model& m)
+void HotkeyChip(const char* id, std::string& spec, bool pad, float w, float h, Model& m, bool required)
 {
-    std::string padPart, keyPart;
-    SplitSpec(spec, padPart, keyPart);
+    std::string padPart, keyPart, rest;
+    SplitSpec(spec, padPart, keyPart, &rest);
     const std::string cur = pad ? padPart : keyPart;
     BeginCustom();
     const bool pressed = ImGui::InvisibleButton(id, ImVec2(w, h), ImGuiButtonFlags_EnableNav);
@@ -1163,6 +1264,7 @@ void HotkeyChip(const char* id, std::string& spec, bool pad, float w, float h, M
             EndCapture();
             g_cap.spec = &spec;
             g_cap.pad = pad;
+            g_cap.required = required;
             g_cap.lastInput = ImGui::GetTime();
         }
         mine = g_cap.spec == &spec && g_cap.pad == pad;
@@ -1171,8 +1273,11 @@ void HotkeyChip(const char* id, std::string& spec, bool pad, float w, float h, M
     if (focused && !g_cap.spec && !cur.empty() &&
         (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
          ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
-        spec = pad ? keyPart : padPart;
-        m.reqSave = true;
+        const std::string next = pad ? JoinSpec(std::string(), keyPart, rest) : JoinSpec(padPart, std::string(), rest);
+        if (!next.empty() || !required) {   // 打开面板的最后一个键不让清
+            spec = next;
+            m.reqSave = true;
+        }
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1203,7 +1308,7 @@ void HotkeyChip(const char* id, std::string& spec, bool pad, float w, float h, M
     dl->PopClipRect();
 }
 
-void HotkeyRow(const char* id, const char* label, std::string& spec, Model& m)
+void HotkeyRow(const char* id, const char* label, std::string& spec, Model& m, bool required = false)
 {
     const float w = ImGui::GetContentRegionAvail().x;
     const float rowH = 50 * S, h = 38 * S, gap = 8 * S;
@@ -1213,9 +1318,9 @@ void HotkeyRow(const char* id, const char* label, std::string& spec, Model& m)
     const float cw = (w * (1.0f - kHkLabelW) - 6 * S - gap) * 0.5f;
     ImGui::PushID(id);
     ImGui::SetCursorScreenPos(ImVec2(x0, p.y + (rowH - h) * 0.5f));
-    HotkeyChip("##pad", spec, true, cw, h, m);
+    HotkeyChip("##pad", spec, true, cw, h, m, required);
     ImGui::SetCursorScreenPos(ImVec2(x0 + cw + gap, p.y + (rowH - h) * 0.5f));
-    HotkeyChip("##key", spec, false, cw, h, m);
+    HotkeyChip("##key", spec, false, cw, h, m, required);
     ImGui::PopID();
     ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
     ImGui::Dummy(ImVec2(0, 0));
@@ -1252,6 +1357,7 @@ void PageSettings(Model& m)
 
     if (ToggleRow("##wy", "翼龙起始", "普通地图坐翼龙开局，关闭即为在营地开局", &c.wyvern)) m.reqSave = true;
     if (ToggleRow("##bo", "缩短转场黑屏", "下次开游戏生效", &c.quickBlackout)) m.reqSave = true;
+    if (ToggleRow("##qr", "快速重置", nullptr, &c.quickReset)) m.reqSave = true;
     ImGui::Dummy(ImVec2(0, 10 * S));
 
     Text(fReg, szSmall, kFaint, "面板");
@@ -1276,7 +1382,7 @@ void PageSettings(Model& m)
     HotkeyHeader();
     HotkeyRow("##hk1", "重开", c.hkRestart, m);
     HotkeyRow("##hk2", "只重置回据点", c.hkResetOnly, m);
-    HotkeyRow("##hk3", "打开面板", c.hkPanel, m);
+    HotkeyRow("##hk3", "打开面板", c.hkPanel, m, true);
     ImGui::Dummy(ImVec2(0, 4 * S));
     const char* hint = !g_cap.spec ? "选中一格按 A 或点一下，再按想用的键"
                        : g_cap.pad ? "按住想用的手柄键（至少两个），全部松开就记住 · Esc 取消"
@@ -1389,8 +1495,15 @@ void Init(float scale)
     const std::string dir = std::string(fonts) + "\\Fonts\\";
     ImFontConfig fc;
     fc.OversampleH = 1;
-    fReg = io.Fonts->AddFontFromFileTTF((dir + "msyh.ttc").c_str(), szBody, &fc);
-    fBold = io.Fonts->AddFontFromFileTTF((dir + "msyhbd.ttc").c_str(), szBody, &fc);
+    // 字体文件不在（精简过的系统、Wine 下是 .ttf）：返回空、换下一个。不带这个标志 ImGui 会直接断言
+    fc.Flags |= ImFontFlags_NoLoadError;
+    auto load = [&](std::initializer_list<const char*> names) -> ImFont* {
+        for (const char* n : names)
+            if (ImFont* f = io.Fonts->AddFontFromFileTTF((dir + n).c_str(), szBody, &fc)) return f;
+        return nullptr;
+    };
+    fReg = load({"msyh.ttc", "msyh.ttf", "simhei.ttf", "simsun.ttc"});
+    fBold = load({"msyhbd.ttc", "msyhbd.ttf"});
     if (!fReg) fReg = io.Fonts->AddFontDefault();
     if (!fBold) fBold = fReg;
     io.FontDefault = fReg;
@@ -1488,9 +1601,11 @@ void OnOpen(Model& m)
 {
     g_page = kHome;
     g_focus = 2;
+    g_sideFocusedLast = false;   // 上次关面板时焦点在侧栏：不清的话第一帧会被当成「在侧栏里移动」，直接切到那一页
     g_search[0] = 0;
     g_animHc = 0;
     g_popupLastFrame = false;
+    g_closePopups = true;   // 上次关面板时开着的弹窗（删除确认、下拉选项）：下一帧里关掉
     EndCapture();
     m.capturing = false;
     ImGui::SetNavCursorVisible(true);
@@ -1537,6 +1652,10 @@ void Draw(Model& m, float screenW, float screenH)
     const ImGuiWindowFlags wf = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
                                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    if (g_closePopups) {   // 上次关面板时没关的弹窗：关掉（ClosePopupToLevel 要求栈里真有东西）
+        g_closePopups = false;
+        if (!GImGui->OpenPopupStack.empty()) ImGui::ClosePopupToLevel(0, false);
+    }
     const bool shown = ImGui::Begin("IN-Q##panel", nullptr, wf);
     ImGui::PopStyleVar();
     if (!shown) { ImGui::End(); return; }

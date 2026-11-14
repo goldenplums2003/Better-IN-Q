@@ -5,10 +5,13 @@
 //  修 bug / 加功能后重新分发；CT 的中文化与修改由 QCanon 完成。
 // ============================================================================
 #include <windows.h>
+#include <memory>
 #include <mutex>
 
 #include "config.h"
 #include "cursorfilter.h"
+#include "filelog.h"
+#include "hook.h"
 #include "inq.h"
 #include "kbmfilter.h"
 #include "input.h"
@@ -21,7 +24,21 @@ namespace {
 
 HMODULE g_module = nullptr;
 volatile LONG g_stop = 0;
-const char* const kVersion = "0.7.2";
+// 查煌黑龙终结审判音效、黑龙体型用的测试版，都会把游戏读的音效文件写进日志：
+//   -DBINQ_TEST_NO_QUICK_RESET  测试版 A：不打快速重置补丁
+//   -DBINQ_TEST                 测试版 B：快速重置照常
+// 写死在 DLL 里，不改玩家的配置文件：测完装回正式版就恢复原样
+#if defined(BINQ_TEST_NO_QUICK_RESET)
+#define BINQ_ANY_TEST 1
+const char* const kVersion = "0.8.0 测试版A";
+const char* const kTestNote = "Better-IN-Q：这是测试版A（快速重置已关闭，记录音效文件加载），测完请装回正式版";
+#elif defined(BINQ_TEST)
+#define BINQ_ANY_TEST 1
+const char* const kVersion = "0.8.0 测试版B";
+const char* const kTestNote = "Better-IN-Q：这是测试版B（快速重置照常，记录音效文件加载），测完请装回正式版";
+#else
+const char* const kVersion = "0.8.0";
+#endif
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -67,6 +84,16 @@ void OnOverlayOpened()
 void OnOverlayDraw(float w, float h)
 {
     std::lock_guard<std::mutex> lk(g_mx);
+    if (g_model.wantIme) {   // 在打名字：输入法的拼音和候选词拿来给面板画
+        overlay::ImeText t = overlay::GetImeText();
+        g_model.imeComp = std::move(t.comp);
+        g_model.imeCands = std::move(t.cands);
+        g_model.imeSel = t.sel;
+    } else if (!g_model.imeComp.empty() || !g_model.imeCands.empty()) {
+        g_model.imeComp.clear();
+        g_model.imeCands.clear();
+        g_model.imeSel = -1;
+    }
     ui::Draw(g_model, w, h);
     overlay::SetImeWanted(g_model.wantIme);   // 在打名字：把输入法挂回来，能打中文
 }
@@ -104,6 +131,8 @@ void SetPanel(bool open)
     kbmfilter::SetBlock(g_blocked);
 }
 
+bool AlwaysInstalled() { return true; }   // 没开的过滤器：当成已经装好，不去装
+
 // 手柄、光标过滤：游戏的 XInput 可能晚一点才加载，装不上就隔两秒再试，最多试 2 分钟
 struct Filter {
     const char* name;
@@ -136,10 +165,16 @@ DWORD WINAPI Worker(LPVOID)
     Log("Better-IN-Q %s starting", kVersion);
 
     Hotkeys hk;
+    // 配置文件在但读不了：这一局不存盘，不然一改设置就拿默认值把玩家的套装、猫饭全盖掉
+    bool saveBlocked = false;
     {
         std::lock_guard<std::mutex> lk(g_mx);
         std::string err;
-        if (!LoadConfig(cfgPath, g_cfg, err)) Log("config: %s", err.c_str());
+        if (!LoadConfig(cfgPath, g_cfg, err)) {
+            Log("config: %s", err.c_str());
+            saveBlocked = ::GetFileAttributesW(cfgPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+            if (saveBlocked) Chat("Better-IN-Q：配置文件读不了（被别的程序占着？），这次改的设置不会存盘，重开游戏再试");
+        }
         Log("config: QuestID=%d Reset=%d AcceptOnly=%d Wyvern=%d ActiveSet='%s' Food=%d 全套%zu 猫饭%zu",
             g_cfg.questId, g_cfg.reset, g_cfg.acceptOnly, g_cfg.wyvern, g_cfg.activeSet.c_str(), g_cfg.food,
             g_cfg.sets.size(), g_cfg.foods.size());
@@ -169,12 +204,27 @@ DWORD WINAPI Worker(LPVOID)
     if (!panelOk) Log("overlay: %s", err.c_str());
 
     if (ok) Chat(std::string("Better-IN-Q ") + kVersion + " 已就绪");
+#ifdef BINQ_ANY_TEST
+    if (ok) Chat(kTestNote);
+#endif
     else Chat("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log");
 
     Filter filters[] = {{"padfilter", padfilter::Install, padfilter::Installed},
                         {"cursorfilter", cursorfilter::Install, cursorfilter::Installed},
-                        {"kbmfilter", kbmfilter::Install, kbmfilter::Installed}};
+                        {"kbmfilter", kbmfilter::Install, kbmfilter::Installed},
+                        {"filelog", filelog::Install, AlwaysInstalled}};
+    // 记音效文件：测试版一直开，正式版看配置
+#ifdef BINQ_ANY_TEST
+    const bool fileLog = true;
+#else
+    const bool fileLog = g_cfg.logFileLoads;
+#endif
+    if (fileLog) {
+        filters[3].installed = filelog::Installed;
+        Log("filelog: 开着，游戏读的音效文件会写进这个日志");
+    }
     ULONGLONG lastTick = 0, dirtyAt = 0;
+    std::unique_ptr<Config> toSave;   // 要写盘的那份设置（拿着锁拷出来）
     while (!g_stop) {
         const ULONGLONG now = ::GetTickCount64();
         for (Filter& f : filters) f.Try(now);
@@ -189,10 +239,16 @@ DWORD WINAPI Worker(LPVOID)
             else g_model.keysHeld.clear();
         }
         if (in.Fired(hk.panel) && !capturing) {
-            if (overlay::Failed() || !panelOk) Chat("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）");
-            else SetPanel(!overlay::IsOpen());
+            const bool want = !overlay::IsOpen();
+            if (!overlay::Failed() && panelOk) SetPanel(want);
+            // 要开却没开成（这一次拿不到交换链虚表，或者整局都不行）：说一声，别让人以为没按到
+            if (want && !overlay::IsOpen()) Chat("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）");
         }
         // 面板刚打开就发现画不出来：别一直挡着手柄和鼠标
+        if (overlay::Watchdog() && g_blocked) {   // 开了好几秒还画不出来：先关掉，别一直挡着输入
+            SetPanel(false);
+            Chat("Better-IN-Q：面板没画出来，先关掉了（重开快捷键照常能用，可以再开一次试试）");
+        }
         if (g_blocked && overlay::Failed()) {
             SetPanel(false);
             Chat("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）");
@@ -203,10 +259,16 @@ DWORD WINAPI Worker(LPVOID)
 
         {
             std::lock_guard<std::mutex> lk(g_mx);
+            ui::Model& m = g_model;
+            // 设置先生效，再处理重开、原地换上：不然套装刚设好的猫饭、任务马上被全局设置冲掉
+            if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
+                m.reqSave = false;
+                inq::ApplyOptions(g_cfg);
+                dirtyAt = now;
+            }
             if (!open && restartKey) { Log("hotkey: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
             if (!open && resetKey) { Log("hotkey: reset only"); padfilter::Trace(30000); inq::RequestRestart(g_cfg, true); }
 
-            ui::Model& m = g_model;
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
             if (m.reqRestart) { m.reqRestart = false; Log("panel: restart"); padfilter::Trace(30000); inq::RequestRestart(g_cfg); }
             if (!m.reqApplySet.empty()) {
@@ -214,15 +276,9 @@ DWORD WINAPI Worker(LPVOID)
                 inq::ApplySetInPlace(g_cfg, m.reqApplySet);
                 m.reqApplySet.clear();
             }
-            if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
-                m.reqSave = false;
-                inq::ApplyOptions(g_cfg);
-                dirtyAt = now;
-            }
             if (dirtyAt && now - dirtyAt > 400) {
                 dirtyAt = 0;
-                if (!SaveConfig(cfgPath, g_cfg)) Log("config: 存盘失败");
-                hk.Parse(g_cfg);
+                toSave.reset(new Config(g_cfg));
             }
             if (g_refreshNames) {
                 g_refreshNames = false;
@@ -237,7 +293,16 @@ DWORD WINAPI Worker(LPVOID)
                 m.status = LastChat(6000);
             }
         }
+        // 写盘放到锁外面：面板开着时画面那边每帧都等这把锁，磁盘慢（杀毒在扫）时游戏和输入法候选框会跟着卡
+        if (toSave) {
+            if (saveBlocked) Log("config: 开局时配置文件读不了，这次不存盘");
+            else if (!SaveConfig(cfgPath, *toSave)) Log("config: 存盘失败");
+            hk.Parse(*toSave);
+            toSave.reset();
+        }
         padfilter::FlushTrace();
+        if (fileLog)
+            for (const std::string& line : filelog::Drain()) Log("%s", line.c_str());
         FlushChat();
         ::Sleep(16);
     }
@@ -247,6 +312,9 @@ DWORD WINAPI Worker(LPVOID)
 } // namespace
 
 extern "C" __declspec(dllexport) BOOL BetterINQ_IsInstalled() { return TRUE; }
+
+// 和别的插件（比如卡点猎人）共用游戏里的输入函数指针时用：告诉它我们把 api 换成了谁，它好接在后面（见 hook.h）
+extern "C" __declspec(dllexport) void* InputHookFor(void* api) { return hook::ChainHookFor(api); }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {

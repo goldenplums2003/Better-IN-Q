@@ -152,6 +152,11 @@ bool Input::Held(const Combo& c) const
     }
     for (int vk : c.keys)
         if (!(::GetAsyncKeyState(vk) & 0x8000)) return false;
+    // 组合里没有的修饰键不能按着：不然按 Ctrl+Shift+N 时 Ctrl+N 也算按下了，两个快捷键一起触发
+    if (!c.keys.empty())
+        for (int mod : {VK_CONTROL, VK_SHIFT, VK_MENU})
+            if (std::find(c.keys.begin(), c.keys.end(), mod) == c.keys.end() && (::GetAsyncKeyState(mod) & 0x8000))
+                return false;
     return true;
 }
 

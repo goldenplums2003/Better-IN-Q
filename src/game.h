@@ -65,9 +65,20 @@ template <class T> inline T Rd(std::uintptr_t a)
     if (Readable(a, sizeof(T))) std::memcpy(&v, reinterpret_cast<const void*>(a), sizeof(T));
     return v;
 }
+// 可写：整段在同一块已提交、可读写的内存里（往只读页上写会直接把游戏带崩）
+inline bool Writable(std::uintptr_t a, std::size_t n)
+{
+    if (a < 0x10000) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!::VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+    if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return false;
+    return a + n <= reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+}
+
 template <class T> inline bool Wr(std::uintptr_t a, T v)
 {
-    if (!Readable(a, sizeof(T))) return false;
+    if (!Writable(a, sizeof(T))) return false;
     std::memcpy(reinterpret_cast<void*>(a), &v, sizeof(T));
     return true;
 }

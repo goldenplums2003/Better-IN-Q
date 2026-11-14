@@ -2,11 +2,14 @@
 //   overlay_test.exe <输出目录>
 #include <windows.h>
 #include <imm.h>
+#include <msctf.h>
+#include <objbase.h>
 #include <d3d11.h>
 #include <wincodec.h>
 #include <xinput.h>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <string>
 
 #include "../src/config.h"
@@ -60,11 +63,45 @@ static void Save(void* tex)
     g_shot.clear();
 }
 
+// 假的输入法候选表（TSF 的 ITfCandidateListUIElement），虚表顺序照 Windows SDK：
+// 23 个词，每页 9 个，现在翻到第 2 页，选中的是第 11 个（这一页的第 2 个）。
+// 游戏里出过一次崩溃：取候选表的调用被编译器优化成了空调用，离线又没跑到。用它把那段代码真跑一遍
+struct FakeCandList {
+    void** vt;
+    static HRESULT STDMETHODCALLTYPE QI(FakeCandList* self, REFIID, void** out) { *out = self; return S_OK; }
+    static ULONG STDMETHODCALLTYPE Ref(FakeCandList*) { return 1; }
+    static HRESULT STDMETHODCALLTYPE Nope(FakeCandList*) { return E_NOTIMPL; }
+    static HRESULT STDMETHODCALLTYPE Count(FakeCandList*, UINT* n) { *n = 23; return S_OK; }
+    static HRESULT STDMETHODCALLTYPE Sel(FakeCandList*, UINT* n) { *n = 10; return S_OK; }
+    static HRESULT STDMETHODCALLTYPE Str(FakeCandList*, UINT i, BSTR* out)
+    {
+        typedef BSTR(WINAPI * Alloc)(const OLECHAR*);
+        static const Alloc alloc = reinterpret_cast<Alloc>(::GetProcAddress(::LoadLibraryW(L"oleaut32.dll"), "SysAllocString"));
+        wchar_t b[16];
+        std::swprintf(b, 16, L"\u8BCD%u", i);   // 词0、词1……
+        *out = alloc ? alloc(b) : nullptr;
+        return *out ? S_OK : E_OUTOFMEMORY;
+    }
+    static HRESULT STDMETHODCALLTYPE PageIdx(FakeCandList*, UINT* idx, UINT size, UINT* pages)
+    {
+        static const UINT starts[3] = {0, 9, 18};
+        *pages = 3;
+        if (idx)
+            for (UINT i = 0; i < size && i < 3; ++i) idx[i] = starts[i];
+        return S_OK;
+    }
+    static HRESULT STDMETHODCALLTYPE Page(FakeCandList*, UINT* n) { *n = 1; return S_OK; }
+};
+
 static void OnInit(float scale) { ui::Init(scale); }
 static void OnOpened() { ui::OnOpen(g_model); ++g_opened; }
 // 和插件里一样：画完把「要不要输入法」告诉 overlay
 static void OnDraw(float w, float h)
 {
+    overlay::ImeText ime = overlay::GetImeText();   // 和插件里一样：输入法的拼音、候选词拿来给面板画
+    g_model.imeComp = ime.comp;
+    g_model.imeCands = ime.cands;
+    g_model.imeSel = ime.sel;
     ui::Draw(g_model, w, h);
     overlay::SetImeWanted(g_model.wantIme);
     ++g_draws;
@@ -170,6 +207,19 @@ int wmain(int argc, wchar_t** argv)
     wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"binq_test";
     RegisterClassExW(&wc);
     HWND hw = CreateWindowExW(0, wc.lpszClassName, L"MHW", WS_OVERLAPPEDWINDOW, 0, 0, 1936, 1119, nullptr, nullptr, wc.hInstance, nullptr);
+    // 手动模式（第二个参数 --ime，不在 build.sh 里跑）：用本机真实的输入法打几个字母，看拼音和候选词取不取得到。
+    // 会把测试窗口切到前台几秒钟、往它身上发按键（不在前台就不发）。
+    // 游戏的窗口线程上开着 TSF、输入法界面由程序自己画；测试窗口默认没有，这里照样开一个
+    const bool realIme = argc > 2 && std::wstring(argv[2]) == L"--ime";
+    if (realIme) {
+        ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        static const CLSID kTfThreadMgr = {0x529a9e6b, 0x6587, 0x4f23, {0xab, 0x9e, 0x9c, 0x7d, 0x68, 0x3e, 0x3c, 0x50}};
+        ITfThreadMgrEx* tm = nullptr;
+        TfClientId cid = 0;
+        HRESULT hr = ::CoCreateInstance(kTfThreadMgr, nullptr, CLSCTX_INPROC_SERVER, __uuidof(ITfThreadMgrEx), (void**)&tm);
+        if (SUCCEEDED(hr) && tm) hr = tm->ActivateEx(&cid, TF_TMAE_UIELEMENTENABLEDONLY);
+        std::printf("  ..   真输入法：给窗口线程开 TSF（界面自己画）hr=0x%08lx\n", (unsigned long)hr);
+    }
     RECT rc; GetClientRect(hw, &rc);
     DXGI_SWAP_CHAIN_DESC sd{};
     sd.BufferCount = 2; sd.BufferDesc.Width = rc.right; sd.BufferDesc.Height = rc.bottom;
@@ -217,7 +267,16 @@ int wmain(int argc, wchar_t** argv)
     };
     HIMC imc0 = ImmGetContext(hw);   // 窗口原来挂的输入法（系统没装输入法时是空的）
     if (imc0) ImmReleaseContext(hw, imc0);
+    // 拿不到交换链虚表（游戏里出过一次：临时交换链建不出来）：这一次打不开，但不算整局失败，Present 也没动
+    overlay::SetDebugVtableFail(3);
     overlay::SetOpen(true);
+    CHECK(!overlay::IsOpen() && !overlay::Failed(), "拿不到虚表：这一次没打开，没判整局失败");
+    CHECK(scVt[8] == presentOrig, "拿不到虚表：Present 没动");
+    // 带窗口的办法不行时，改用不带窗口的办法：下面整段都是靠它拿到的虚表挂的钩子
+    overlay::SetDebugVtableFail(1);
+    overlay::SetOpen(true);
+    CHECK(overlay::IsOpen() && scVt[8] != presentOrig, "再开一次：用不带窗口的办法拿到虚表，Present 挂上了");
+    overlay::SetDebugVtableFail(0);
     for (int i = 0; i < 6; ++i) {
         if (i == 5) g_shot = out + L"\\overlay_1080p.png";
         frame(0.25f, 0.35f, 0.25f);
@@ -241,6 +300,105 @@ int wmain(int argc, wchar_t** argv)
         HIMC on = ImmGetContext(hw);
         CHECK(on || !imc0, "名字框在打字：游戏窗口挂上了输入法（系统%s输入法）", imc0 ? "有" : "没有");
         if (on) ImmReleaseContext(hw, on);
+
+        // 拼音和候选词由面板自己画：塞一份假的，面板拿得到、画得出来
+        overlay::SetDebugImeText(L"hei'long", {L"\u9ED1\u9F99", L"\u9ED1\u7B3C", L"\u9ED1\u9686", L"\u563F"}, 0);
+        for (int i = 0; i < 3; ++i) {
+            if (i == 2) g_shot = out + L"\\overlay_ime.png";
+            frame(0.25f, 0.35f, 0.25f);
+        }
+        CHECK(g_model.imeComp == "hei'long" && g_model.imeCands.size() == 4 && g_model.imeCands[0] == "\xE9\xBB\x91\xE9\xBE\x99" &&
+                  g_model.imeSel == 0,
+              "输入法的拼音和 4 个候选词到了面板（%s / %zu 个）", g_model.imeComp.c_str(), g_model.imeCands.size());
+        overlay::SetDebugImeText(L"", {}, -1);
+        for (int i = 0; i < 2; ++i) frame(0.25f, 0.35f, 0.25f);
+        CHECK(g_model.imeComp.empty() && g_model.imeCands.empty(), "清掉之后面板里也没了");
+
+        // TSF 输入法给候选表的那条路：喂一个假的候选表对象，取出来的应当是当前页那 9 个
+        {
+            void* vt[15] = {
+                reinterpret_cast<void*>(&FakeCandList::QI),   reinterpret_cast<void*>(&FakeCandList::Ref),
+                reinterpret_cast<void*>(&FakeCandList::Ref),  reinterpret_cast<void*>(&FakeCandList::Nope),
+                reinterpret_cast<void*>(&FakeCandList::Nope), reinterpret_cast<void*>(&FakeCandList::Nope),
+                reinterpret_cast<void*>(&FakeCandList::Nope), reinterpret_cast<void*>(&FakeCandList::Nope),
+                reinterpret_cast<void*>(&FakeCandList::Nope), reinterpret_cast<void*>(&FakeCandList::Count),
+                reinterpret_cast<void*>(&FakeCandList::Sel),  reinterpret_cast<void*>(&FakeCandList::Str),
+                reinterpret_cast<void*>(&FakeCandList::PageIdx), reinterpret_cast<void*>(&FakeCandList::Nope),
+                reinterpret_cast<void*>(&FakeCandList::Page)};
+            FakeCandList fake{vt};
+            overlay::DebugReadCandidateElement(&fake);
+            for (int i = 0; i < 2; ++i) frame(0.25f, 0.35f, 0.25f);
+            CHECK(g_model.imeCands.size() == 9 && g_model.imeCands[0] == "\xE8\xAF\x8D" "9" &&
+                      g_model.imeCands[8] == "\xE8\xAF\x8D" "17" && g_model.imeSel == 1,
+                  "TSF 候选表：取到第 2 页的 9 个（%zu 个，第一个「%s」，选中第 %d 个；%s）", g_model.imeCands.size(),
+                  g_model.imeCands.empty() ? "" : g_model.imeCands[0].c_str(), g_model.imeSel, overlay::DebugImeRaw().c_str());
+            overlay::SetDebugImeText(L"", {}, -1);
+            for (int i = 0; i < 2; ++i) frame(0.25f, 0.35f, 0.25f);
+        }
+
+        if (realIme) {
+            ::ShowWindow(hw, SW_SHOWNORMAL);
+            const HWND was = ::GetForegroundWindow();
+            const DWORD fgTid = was ? ::GetWindowThreadProcessId(was, nullptr) : 0, me = ::GetCurrentThreadId();
+            if (fgTid && fgTid != me) ::AttachThreadInput(fgTid, me, TRUE);
+            ::SetForegroundWindow(hw);
+            ::SetFocus(hw);
+            if (fgTid && fgTid != me) ::AttachThreadInput(fgTid, me, FALSE);
+            auto spin = [&](int n) {
+                for (int i = 0; i < n; ++i) {
+                    pump();
+                    frame(0.25f, 0.35f, 0.25f);
+                    ::Sleep(15);
+                }
+            };
+            spin(20);
+            const bool fg = ::GetForegroundWindow() == hw;
+            std::printf("  ..   真输入法：测试窗口%s前台，键盘布局 %08llX\n", fg ? "在" : "没到",
+                        (unsigned long long)(ULONG_PTR)::GetKeyboardLayout(0));
+            if (fg) {
+                if (HIMC c = ImmGetContext(hw)) {
+                    DWORD conv = 0, sent = 0;
+                    ImmSetOpenStatus(c, TRUE);
+                    ImmGetConversionStatus(c, &conv, &sent);
+                    ImmSetConversionStatus(c, conv | IME_CMODE_NATIVE, sent);
+                    ImmReleaseContext(hw, c);
+                }
+                auto key = [&](WORD vk) {
+                    if (::GetForegroundWindow() != hw) return false;   // 不在前台就不发，免得打到别的程序里
+                    INPUT in[2] = {};
+                    in[0].type = in[1].type = INPUT_KEYBOARD;
+                    in[0].ki.wVk = in[1].ki.wVk = vk;
+                    in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                    ::SendInput(2, in, sizeof(INPUT));
+                    return true;
+                };
+                int sent = 0;
+                for (const char* k = "HEILONG"; *k; ++k) {
+                    if (!key((WORD)*k)) break;
+                    ++sent;
+                    spin(6);
+                }
+                spin(30);
+                const overlay::ImeText r = overlay::GetImeText();
+                std::string all;
+                for (std::size_t i = 0; i < r.cands.size(); ++i) all += (i ? " | " : "") + r.cands[i];
+                std::printf("  ..   真输入法：发了 %d 个键；拼音「%s」；候选 %zu 个（选中第 %d 个）：%s\n", sent, r.comp.c_str(),
+                            r.cands.size(), r.sel, all.c_str());
+                std::printf("  ..   真输入法：%s\n", overlay::DebugImeRaw().c_str());
+                g_shot = out + L"\\overlay_ime_real.png";
+                frame(0.25f, 0.35f, 0.25f);
+                key(VK_ESCAPE);   // 取消这次组字
+                spin(10);
+            }
+            // 关面板（会写一行 ime 诊断日志），窗口收起来。手动模式到此为止，后面的测试不跑
+            overlay::SetOpen(false);
+            for (int i = 0; i < 3; ++i) { frame(0.25f, 0.35f, 0.25f); pump(); }
+            ::ShowWindow(hw, SW_HIDE);
+            if (was) ::SetForegroundWindow(was);
+            std::printf("\n手动模式结束（%d 项失败）\n", g_fail);
+            return g_fail ? 1 : 0;
+        }
+
         SendMessageW(hw, WM_IME_CHAR, 0x732B, 1);   // 猫
         SendMessageW(hw, WM_IME_CHAR, 0x996D, 1);   // 饭
         pump();                                      // 系统把它们转成 WM_CHAR 放进消息队列，游戏的消息循环会取

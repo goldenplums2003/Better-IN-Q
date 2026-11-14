@@ -115,6 +115,11 @@ static int RpB() { return 2; }
 static int RpC() { return 3; }
 static int (*volatile g_rp[3])() = {RpA, RpB, RpA};
 static void* vtB[16];
+// 串链：FakeApi 扮演系统函数，g_gameSlot 扮演游戏数据段里指向它的指针
+static int FakeApi(int x) { return x * 2; }
+void* volatile g_gameSlot = reinterpret_cast<void*>(FakeApi);
+static int (*g_ourOrig)(int) = nullptr;
+static int OurHook(int x) { return g_ourOrig(x) + 100; }
 static void H1(hook::Ctx* c)
 {
     // 换虚表、换对象 —— 和 CT 里的装备套装分支一样
@@ -234,6 +239,28 @@ int main(int argc, char** argv)
                                                (const void*)&g_rp[3], &where);
     CHECK(rn == 1, "ReplaceModulePointers 换了 %d 处（期望 1）：%s", rn, where.c_str());
     CHECK(g_rp[0]() == 3 && g_rp[1]() == 2 && g_rp[2]() == 1, "第 1 项换成 C，第 2 项不相干，第 3 项在跳过范围里没动");
+
+    // ---- 6：和别的插件（卡点猎人之类）串成链 ----
+    {
+        HMODULE peer = ::LoadLibraryW(L"chain_peer.dll");
+        typedef void (*InstallFn)(void**);
+        typedef int (*CallsFn)();
+        const InstallFn peerInstall = peer ? reinterpret_cast<InstallFn>(::GetProcAddress(peer, "PeerInstall")) : nullptr;
+        const CallsFn peerCalls = peer ? reinterpret_cast<CallsFn>(::GetProcAddress(peer, "PeerCalls")) : nullptr;
+        CHECK(peerInstall && peerCalls, "载入扮演别的插件的 chain_peer.dll");
+        if (peerInstall && peerCalls) {
+            peerInstall(const_cast<void**>(&g_gameSlot));   // 它先装：游戏表里已经不是系统函数了
+            std::string w2;
+            const int n = hook::ReplaceChained(mod, reinterpret_cast<void*>(FakeApi), reinterpret_cast<void*>(OurHook),
+                                               reinterpret_cast<void**>(&g_ourOrig), &w2);
+            CHECK(n == 1 && g_gameSlot == reinterpret_cast<void*>(OurHook), "顺着它导出的 InputHookFor 找到它的钩子换掉（%s）",
+                  w2.c_str());
+            const int r = reinterpret_cast<int (*)(int)>(g_gameSlot)(5);
+            CHECK(r == 1000 + 5 * 2 + 100 && peerCalls() == 1, "游戏 → 我们 → 它 → 系统，一个不落：%d", r);
+            CHECK(hook::ChainHookFor(reinterpret_cast<void*>(FakeApi)) == reinterpret_cast<void*>(OurHook),
+                  "别的插件问起来：FakeApi 我们换成了 OurHook");
+        }
+    }
 
     std::printf("\n%s（%d 项失败）\n", g_fail ? "有失败" : "全部通过", g_fail);
     return g_fail ? 1 : 0;

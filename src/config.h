@@ -15,6 +15,8 @@ struct FoodPreset {
 
 // 任务选「无」：按重开快捷键时不重开，原地套用装备、道具、猫饭
 constexpr int kQuestNone = -1;
+// 全套里猫饭选「当前猫饭」：不指定预设，重开后把玩家自己吃的那份写回去
+constexpr int kFoodCurrent = -1;
 
 // 全套：装备套装 + 道具套装 + 联动快捷栏 + 猫饭 + 任务（CT 里 allsetitem 的一行）
 struct LoadoutSet {
@@ -22,7 +24,7 @@ struct LoadoutSet {
     std::string equip;        // 编号 1..224，或游戏里起的名字
     std::string item;         // 编号 1..80，或游戏里起的名字
     bool linkRadial = false;  // 套道具时联动快捷栏
-    int food = 0;             // 猫饭编号，0 = 不改
+    int food = 0;             // 猫饭编号，0 = 不改，kFoodCurrent = 当前猫饭
     int quest = 0;            // 任务 ID，0 = 不改（用全局的），kQuestNone = 无（原地套用）
 };
 
@@ -36,6 +38,7 @@ struct Config {
     int food = 0;               // 每次进任务都吃的猫饭，0 = 不管
     bool quickBlackout = true;  // 缩短转场黑屏
     bool quickReset = true;     // 快速重置（CT 的 +1B71596 4→5，重置时跳过一段流程）
+    bool logFileLoads = false;  // 把游戏读的音效文件写进日志（排查煌黑龙音效用，见 filelog.h）
     bool foodEveryQuest = false;  // 自己正常接任务出发时也换成插件的猫饭（关着 = 只有插件重开才换）
     int panelOpacity = 80;      // 面板不透明度 %，越小越透
     int debug = 0;
@@ -69,6 +72,7 @@ struct Config {
     }
     // 猫饭在面板里显示的名字
     std::string FoodName(int id) const {
+        if (id == kFoodCurrent) return "当前猫饭";
         auto it = foods.find(id);
         return (it != foods.end() && !it->second.name.empty()) ? it->second.name : "猫饭 " + std::to_string(id);
     }

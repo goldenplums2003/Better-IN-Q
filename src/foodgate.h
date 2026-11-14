@@ -8,6 +8,46 @@
 //  的那一次读盘结束就「退膛」。重开失败也退膛。always = 设置里勾了「正常进任务也吃」，每次读盘都写。
 // ============================================================================
 
+#include <algorithm>
+
+// ============================================================================
+//  「当前猫饭」：记住玩家自己吃的猫饭
+//
+//  游戏里生效的猫饭和预设是同一块 8 个数（体力、耐力、攻击、防御、属性耐性、技能×3）。
+//  重开后游戏不再给饭的效果，所以平时（不在读盘时）每拍看一眼，有饭就记下；
+//  选了「当前猫饭」的话，重开进任务的那次读盘把记下的写回去。
+//  没饭（全 0、技能全是 -1 或全是 0）和不像猫饭的数（越界）不记：被游戏清掉之后，记着的还是上一份。
+// ============================================================================
+struct MealMemory {
+    bool has = false;
+    int v[8] = {0, 0, 0, 0, 0, -1, -1, -1};
+
+    // 范围同配置里的预设：体力 0~5，耐力 0~2，攻击 / 防御 / 耐性 0~3，技能 -1~56
+    static bool Valid(const int* m)
+    {
+        static const int hi[5] = {5, 2, 3, 3, 3};
+        for (int i = 0; i < 5; ++i) if (m[i] < 0 || m[i] > hi[i]) return false;
+        for (int i = 5; i < 8; ++i) if (m[i] < -1 || m[i] > 56) return false;
+        return true;
+    }
+    static bool Empty(const int* m)
+    {
+        for (int i = 0; i < 5; ++i) if (m[i] != 0) return false;
+        const bool none = m[5] == -1 && m[6] == -1 && m[7] == -1;
+        const bool zero = m[5] == 0 && m[6] == 0 && m[7] == 0;   // 整块清成 0 的情况（三个技能都是 0 号的饭不存在）
+        return none || zero;
+    }
+    // 每拍把游戏里现在的 8 个数给它。返回 true = 记下了新的一份
+    bool Observe(const int* m, bool loading)
+    {
+        if (loading || !Valid(m) || Empty(m)) return false;
+        if (has && std::equal(m, m + 8, v)) return false;
+        std::copy(m, m + 8, v);
+        has = true;
+        return true;
+    }
+};
+
 struct FoodGate {
     bool armed = false;       // 这一轮重开还没进完任务
     bool finalLoad = false;   // 重开流程已经走完，正在进任务的那次读盘
